@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ReAct Agent · 本地智能体</title>
+  <meta name="description" content="本地 ReAct 智能体：工具调用、会话记忆与推理轨迹。">
+  <meta name="theme-color" content="#ad3f2c">
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+  <link rel="icon" href="/static/favicon.ico" sizes="any">
+  <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+  <link rel="manifest" href="/static/manifest.webmanifest">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar" id="sidebar">
+      <div class="brand">
+        <img class="brand-mark" src="/static/icon.svg" width="34" height="34" alt="">
+        <div class="brand-text">
+          <strong>ReAct</strong>
+          <span>推理 · 工具 · 记忆</span>
+        </div>
+      </div>
+
+      <button class="new-chat" id="new-session" type="button">
+        <span>新建对话</span>
+        <span class="plus">+</span>
+      </button>
+
+      <div class="section-label">对话</div>
+      <nav class="session-list" id="session-list"></nav>
+
+      <div class="sidebar-footer">
+        <button class="ghost-btn" id="open-memory" type="button">
+          <span class="memory-swatch"></span> 记忆管理
+        </button>
+        <div class="model-info" id="model-info">连接中…</div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <button class="icon-btn mobile-only" id="toggle-sidebar" type="button" aria-label="打开侧栏">☰</button>
+        <div class="title-wrap">
+          <h1 id="session-title">新对话</h1>
+          <p id="session-subtitle">每个会话拥有独立记忆</p>
+        </div>
+        <div class="status ready" id="status"><span class="dot"></span><span id="status-text">就绪</span></div>
+      </header>
+
+      <section class="messages" id="messages">
+        <div class="welcome" id="welcome">
+          <div class="welcome-kicker">Local ReAct Agent / DeepSeek</div>
+          <h2>今天想了解什么？</h2>
+          <p>我会先思考，再调用本机工具，把推理过程一并展示给你。</p>
+          <div class="suggestions">
+            <button type="button" data-prompt="北京今天天气怎么样？未来三天呢？">北京今天天气怎么样？</button>
+            <button type="button" data-prompt="介绍一下 ReAct 论文的核心思想">ReAct 论文讲什么？</button>
+            <button type="button" data-prompt="现在纽约几点？100 美元合多少人民币？">纽约时间与汇率换算</button>
+            <button type="button" data-prompt="记住：我在这个对话里正在做 ReAct 智能体项目">记住这个对话的上下文</button>
+          </div>
+        </div>
+      </section>
+
+      <form class="composer" id="composer">
+        <div class="composer-box">
+          <textarea id="input" rows="1" placeholder="输入问题… Enter 发送，Shift+Enter 换行"></textarea>
+          <button type="submit" class="send-btn" id="send" aria-label="发送">
+            <span class="send-icon">↑</span>
+            <span class="send-label">发送</span>
+          </button>
+        </div>
+        <div class="composer-hint">工具在本机执行 · 外部信息请自行甄别</div>
+      </form>
+    </main>
+
+    <div class="scrim" id="scrim"></div>
+  </div>
+
+  <aside class="drawer" id="memory-drawer" aria-hidden="true">
+    <div class="drawer-head">
+      <div>
+        <h2>记忆管理</h2>
+        <p>会话记忆只属于当前对话；全局记忆跨对话共享。</p>
+      </div>
+      <button class="icon-btn" id="close-memory" type="button" aria-label="关闭">✕</button>
+    </div>
+    <div class="drawer-body">
+      <section class="memory-section">
+        <div class="memory-head">
+          <h3><span class="memory-dot session"></span> 本会话记忆</h3>
+          <span class="count" id="session-memory-count">0</span>
+        </div>
+        <div class="memory-list" id="session-memory-list"></div>
+      </section>
+      <section class="memory-section">
+        <div class="memory-head">
+          <h3><span class="memory-dot global"></span> 全局记忆</h3>
+          <span class="count" id="global-memory-count">0</span>
+        </div>
+        <div class="memory-list" id="global-memory-list"></div>
+      </section>
+      <button class="ghost-btn wide" id="refresh-memory" type="button">刷新记忆</button>
+    </div>
+  </aside>
+
+  <div class="toast" id="toast"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

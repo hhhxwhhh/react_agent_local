@@ -1,0 +1,14 @@
+# 本地密钥与隐私数据
+.env
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Agent 沙箱：默认忽略生成物，只跟踪 notes/ 下的笔记
+workspace/*
+!workspace/notes/
+!workspace/notes/**
