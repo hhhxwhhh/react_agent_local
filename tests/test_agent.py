@@ -395,6 +395,150 @@ class TestLoopGuards(unittest.TestCase):
         self.assertEqual(final["citations"], ["https://example.com/weather"])
         self.assertEqual(agent.last_citations, ["https://example.com/weather"])
 
+    def test_long_scratchpad_is_summarized(self):
+        llm = FakeLLM(
+            [
+                'Thought: 查询一个很长的结果。\nAction: calculate\n'
+                'Action Input: {"expression": "1+1"}',
+                "任务目标：计算。\n关键结果：观测很长，但结论有效。",
+                "Thought: 完成。\nFinal Answer: 已基于压缩后的上下文回答。",
+            ]
+        )
+        events: list[dict] = []
+        with patch.object(
+            agent_module,
+            "run_tool",
+            return_value="关键观测：" + "X" * 1500,
+        ):
+            agent = ReActAgent(
+                llm,
+                max_steps=4,
+                verbose=False,
+                use_color=False,
+                context_compact_chars=500,
+                context_keep_chars=200,
+                summary_max_chars=150,
+                on_event=events.append,
+            )
+            answer = agent.run("测试上下文压缩")
+
+        self.assertEqual(answer, "已基于压缩后的上下文回答。")
+        self.assertEqual(len(llm.calls), 3)
+        self.assertIn("上下文压缩器", llm.calls[1][0])
+        self.assertIn("[较早步骤摘要", llm.calls[2][1])
+        self.assertIn("任务目标：计算。", llm.calls[2][1])
+        self.assertIn("[最近步骤原文]", llm.calls[2][1])
+        self.assertEqual(agent.last_compactions, 1)
+        self.assertTrue(
+            any("上下文过长" in event.get("text", "") for event in events)
+        )
+
+    def test_scratchpad_summary_falls_back_when_llm_fails(self):
+        class FailingSummaryLLM(FakeLLM):
+            def complete(self, system_prompt, user_prompt, stop=None):
+                self.calls.append((system_prompt, user_prompt))
+                if "上下文压缩器" in system_prompt:
+                    raise RuntimeError("summary unavailable")
+                if not self.replies:
+                    raise AssertionError("FakeLLM 没有更多预设回复")
+                return self.replies.pop(0)
+
+        llm = FailingSummaryLLM(
+            [
+                'Thought: 查询。\nAction: calculate\n'
+                'Action Input: {"expression": "2+2"}',
+                "Thought: 完成。\nFinal Answer: 兜底成功。",
+            ]
+        )
+        events: list[dict] = []
+        with patch.object(
+            agent_module,
+            "run_tool",
+            return_value="Observation 内容：" + "Y" * 1200,
+        ):
+            agent = ReActAgent(
+                llm,
+                max_steps=4,
+                verbose=False,
+                use_color=False,
+                context_compact_chars=500,
+                context_keep_chars=200,
+                summary_max_chars=200,
+                on_event=events.append,
+            )
+            answer = agent.run("测试摘要失败")
+
+        self.assertEqual(answer, "兜底成功。")
+        self.assertEqual(agent.last_compactions, 1)
+        self.assertIn("Observation:", llm.calls[2][1])
+        self.assertTrue(
+            any("摘要生成失败" in event.get("text", "") for event in events)
+        )
+
+    def test_long_history_is_summarized_and_reused(self):
+        history = [
+            {
+                "role": "user" if index % 2 == 0 else "assistant",
+                "content": f"消息{index}：" + "内容" * 40,
+            }
+            for index in range(8)
+        ]
+        summary = "用户目标：继续之前的任务；关键事实：消息 0-5 已处理。"
+        llm = FakeLLM(
+            [summary, "Thought: 完成。\nFinal Answer: 记得之前的约定。"]
+        )
+        events: list[dict] = []
+        agent = ReActAgent(
+            llm,
+            max_steps=3,
+            verbose=False,
+            use_color=False,
+            history_compact_chars=100000,
+            history_compact_messages=4,
+            history_keep_messages=2,
+            history_summary_batch_messages=1,
+            on_event=events.append,
+        )
+        answer = agent.run("继续", history=history)
+
+        self.assertEqual(answer, "记得之前的约定。")
+        self.assertEqual(len(llm.calls), 2)
+        self.assertIn("上下文压缩器", llm.calls[0][0])
+        self.assertIn("更早对话摘要", llm.calls[1][1])
+        self.assertIn(summary, llm.calls[1][1])
+        self.assertIn("消息7", llm.calls[1][1])
+        self.assertNotIn("消息0", llm.calls[1][1])
+        self.assertEqual(agent.last_history_summary, summary)
+        self.assertEqual(agent.last_history_summary_count, 6)
+        self.assertTrue(
+            any("会话历史过长" in event.get("text", "") for event in events)
+        )
+
+        # 下一轮直接复用已保存的摘要，不再重复调用摘要模型。
+        reused_llm = FakeLLM(
+            ["Thought: 完成。\nFinal Answer: 继续复用。"]
+        )
+        reused_agent = ReActAgent(
+            reused_llm,
+            max_steps=3,
+            verbose=False,
+            use_color=False,
+            history_compact_chars=100000,
+            history_compact_messages=4,
+            history_keep_messages=2,
+            history_summary_batch_messages=1,
+        )
+        reused_agent.run(
+            "继续",
+            history=history,
+            history_summary=summary,
+            history_summary_count=6,
+        )
+        self.assertEqual(len(reused_llm.calls), 1)
+        self.assertIn(summary, reused_llm.calls[0][1])
+        self.assertEqual(reused_agent.last_history_summary, summary)
+        self.assertEqual(reused_agent.last_history_summary_count, 6)
+
     def test_usage_is_accumulated_across_calls(self):
         class UsageLLM(FakeLLM):
             def __init__(self, replies):

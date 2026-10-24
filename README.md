@@ -64,6 +64,15 @@ DEEPSEEK_MODEL=deepseek-chat
 MAX_STEPS=8
 DEEPSEEK_MAX_TOKENS=2048
 MAX_CONCURRENT_RUNS=3
+
+# 上下文压缩（一般不用改）
+CONTEXT_COMPACT_CHARS=7000
+CONTEXT_KEEP_CHARS=2400
+CONTEXT_SUMMARY_MAX_CHARS=1200
+HISTORY_COMPACT_CHARS=9000
+HISTORY_COMPACT_MESSAGES=12
+HISTORY_KEEP_MESSAGES=8
+HISTORY_SUMMARY_BATCH_MESSAGES=4
 ```
 
 也可以不用 `.env`，直接设置环境变量：
@@ -111,6 +120,8 @@ python server.py --port 8080 --no-browser
 - 每个会话独立保存消息与**会话记忆**，切换会话不会串味；
 - 右下角“记忆管理”抽屉：查看/删除本会话记忆与全局记忆，过期条目会标记；
 - 回答支持 Markdown（代码块、列表、粗体、链接）；
+- 上下文过长时自动压缩：单轮轨迹保留最近步骤原文，较早步骤变成摘要；
+  跨轮历史把较早对话增量摘要后写入会话文件，而不是简单丢弃；
 - 每条回答下方显示本轮模型调用次数、token 用量，以及模型标注的参考来源；
 - 生成过程中点“停止”会通知服务端在下一个检查点取消，不再继续调用工具；
   当前正在进行的模型请求不会被强行中断，本轮回答也不会保存。
@@ -201,12 +212,16 @@ Question ───────>│  DeepSeek（system + scratchpad）│
    - 出现 `Action:` → 解析 JSON 参数，执行工具；
    - 两者都没有 → 把格式纠错提示作为 Observation 喂回去。
 4. 工具结果（含异常）统一转成 `Observation:` 文本，追加到 scratchpad。
-5. 完全相同的 `(工具名, 参数)` 只执行一次；重复调用会被拦截，
+5. 当 scratchpad 超过 `CONTEXT_COMPACT_CHARS` 时，把较早步骤交给模型做结构化摘要，
+   只保留最近 `CONTEXT_KEEP_CHARS` 字符的原文；摘要失败时退回确定性的抽取式压缩。
+6. 跨轮会话历史超过 `HISTORY_COMPACT_MESSAGES` / `HISTORY_COMPACT_CHARS` 时，
+   把最近窗口之外的对话增量摘要，摘要和覆盖条数写入会话 JSON，下一轮直接复用。
+7. 完全相同的 `(工具名, 参数)` 只执行一次；重复调用会被拦截，
    连续两次重复或连续三次格式错误会提前收口，避免把轮数浪费在死循环上。
-6. 每次模型调用都累计 `usage`，结束时把调用次数和 token 用量写回会话。
-7. 如果使用了外部搜索或网页内容，提示词要求模型在结论后用 `[来源: URL]` 标注，
+8. 每次模型调用（包括摘要调用）都累计 `usage`，结束时把调用次数和 token 用量写回会话。
+9. 如果使用了外部搜索或网页内容，提示词要求模型在结论后用 `[来源: URL]` 标注，
    并在末尾列出“参考来源”；服务端会提取这些 URL 随回答一起展示和保存。
-8. 重复上述过程，最多 `MAX_STEPS` 轮；超限时强制模型基于已有信息给出最终答案。
+10. 重复上述过程，最多 `MAX_STEPS` 轮；超限时强制模型基于已有信息给出最终答案。
 
 这对应 ReAct 论文的核心思想：**推理轨迹（Reasoning）与外部动作（Acting）交替进行**，
 让模型既能规划、又能获取实时/外部信息，并依据观察结果修正推理。
@@ -250,11 +265,12 @@ Question ───────>│  DeepSeek（system + scratchpad）│
 - 单文件读取上限 1 MB、写入上限 200000 字符；
 - Agent 被要求在覆盖文件前先用 `read_file` 查看原内容。
 
-### 三层记忆机制
+### 分层记忆机制
 
 | 层级 | 存放位置 | 生命周期 | 用途 |
 |---|---|---|---|
-| 短期上下文 | 进程内 / 请求参数 | 单轮推理 | 当前问题的 ReAct scratchpad |
+| 短期上下文 | 进程内 / 请求参数 | 单轮推理 | 当前问题的 ReAct scratchpad，超长时压缩为“摘要 + 最近原文” |
+| 会话历史摘要 | `data/sessions/<id>.json` 的 `history_summary` | 与对话同生共死 | 较早对话的增量摘要，避免每次重发全部历史 |
 | 会话记忆 | `data/sessions/<id>.json` 的 `memory` | 与对话同生共死 | 本对话的约定、上下文、临时结论 |
 | 全局记忆 | `data/memory.json` | 跨会话持久，可设 TTL | 用户长期偏好，如“我常住杭州” |
 
@@ -271,7 +287,11 @@ Question ───────>│  DeepSeek（system + scratchpad）│
    避免线程之间互相覆盖或写坏 JSON；
 7. 提示词要求 Agent 不把网页内容、临时数据、密钥或敏感信息写入长期记忆，
    并且当记忆与最新工具观测冲突时，以观测为准；
-8. 删除某个会话时，它的会话记忆随会话文件一起删除，全局记忆不受影响。
+8. 删除某个会话时，它的会话记忆与历史摘要随会话文件一起删除，全局记忆不受影响；
+9. **单轮压缩**：ReAct scratchpad 超过阈值后，较早步骤由模型摘要成
+   “目标 / 已完成动作 / 关键事实与 URL / 错误与未决问题”，最近步骤保留原文；
+10. **跨轮压缩**：历史超过阈值后，只把最近 8 条对话保留原文，更早内容增量合并进
+    `history_summary`。摘要失败会退回抽取式压缩，不会因为压缩失败而中断回答。
 
 > 升级说明：如果检测到旧版 `workspace/memory.json`，首次读取时会迁移到
 > `data/memory.json`，旧文件归档为 `data/memory.legacy.json`；迁移不会删除记忆内容。
@@ -288,6 +308,8 @@ Question ───────>│  DeepSeek（system + scratchpad）│
     {"role": "user", "content": "帮我规划杭州周末", "ts": "..."},
     {"role": "assistant", "content": "……", "trace": [...], "ts": "..."}
   ],
+  "history_summary": "用户之前问过杭州周末的天气和交通，已确认周六有雨。",
+  "history_summary_count": 2,
   "memory": {
     "出发地": {
       "value": "上海",
@@ -333,9 +355,9 @@ Question ───────>│  DeepSeek（system + scratchpad）│
 
 ```
 react_agent/
-├── agent.py            # CLI + ReAct 循环 + 历史/事件
+├── agent.py            # CLI + ReAct 循环 + 上下文压缩 + 历史/事件
 ├── server.py           # FastAPI 服务：会话 API + SSE 流式对话
-├── sessions.py         # 会话持久化（消息、标题、会话记忆）
+├── sessions.py         # 会话持久化（消息、标题、历史摘要、会话记忆）
 ├── memory.py           # 全局/会话记忆、TTL、容量与提示词压缩
 ├── storage.py          # 共享路径锁 + JSON 原子写入
 ├── tool_context.py     # 工具运行上下文（当前会话、默认记忆范围）
@@ -372,7 +394,7 @@ react_agent/
 
 ## 7. 测试
 
-离线测试（共 86 个用例，不需要 Key、不需要网络；符号链接用例在无权限的
+离线测试（共 91 个用例，不需要 Key、不需要网络；符号链接用例在无权限的
 Windows 环境会自动跳过）：
 
 ```bash
@@ -382,7 +404,8 @@ python -m unittest discover -s tests -v
 覆盖内容：ReAct 解析与循环、引用提取、重复调用拦截、格式错误收口、取消检查、
 token 用量累计、工具安全、文件沙箱与符号链接逃逸、SSRF 重定向拦截、
 AQI 分级、会话 CRUD、会话/全局记忆隔离、记忆并发写、TTL 与过期清理、
-容量上限、上下文预算、旧记忆迁移、历史与记忆注入、SSE 流式接口、会话落盘。
+容量上限、上下文预算、单轮/跨轮上下文压缩与摘要失败回退、旧记忆迁移、
+历史与记忆注入、SSE 流式接口、会话落盘。
 
 工具联网检查：
 
@@ -421,6 +444,14 @@ python agent.py --check-tools
 - `DEEPSEEK_MAX_TOKENS` 默认 2048；长回答可在 `.env` 里调大。
   模型返回 `finish_reason=length` 时，推理轨迹里会出现“达到长度上限”的提示。
 
+**上下文压缩会不会丢信息？**
+- 压缩只针对较早步骤/对话，最近内容始终保留原文；摘要提示词要求保留目标、事实、
+  数字、URL、错误和未决问题，并禁止编造。
+- 摘要模型失败时，会退回本地抽取式压缩（保留动作、Observation、URL、ERROR 行），
+  不会因为压缩失败而中断本轮回答。
+- 阈值可用 `CONTEXT_COMPACT_CHARS`、`HISTORY_COMPACT_MESSAGES` 等环境变量调整；
+  设得更大就保留更多原文，但 token 消耗也更高。
+
 **点“停止”后发生了什么？**
 - 前端调用 `/api/sessions/<id>/cancel`，服务端在下一个循环检查点抛出取消；
   正在进行的模型请求不会被打断，但后续工具调用会停止，本轮回答不落盘。
@@ -433,6 +464,7 @@ python agent.py --check-tools
 **每次提问消耗多少 token？**
 - 通常 1~4 次模型调用；每轮都会携带系统提示词和已有 scratchpad。
   简单问题一般一次调用即可，复杂任务才会多轮。
+- 上下文超过阈值时会额外调用一次摘要模型；这部分也会计入“模型调用次数”和 token。
 - 回答下方的“共 N tokens”是本轮所有模型调用的累计值。
 
 ---

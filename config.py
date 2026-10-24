@@ -35,3 +35,16 @@ REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "90"))
 DEEPSEEK_MAX_TOKENS = int(os.getenv("DEEPSEEK_MAX_TOKENS", "2048"))
 # Web 服务同时运行的推理任务上限，避免多个会话各自起线程把本机资源占满。
 MAX_CONCURRENT_RUNS = max(1, int(os.getenv("MAX_CONCURRENT_RUNS", "3")))
+
+# 单轮 ReAct 上下文压缩：scratchpad 超过阈值后，把较早步骤摘要掉，只保留最近原文。
+CONTEXT_COMPACT_CHARS = max(800, int(os.getenv("CONTEXT_COMPACT_CHARS", "7000")))
+CONTEXT_KEEP_CHARS = max(300, int(os.getenv("CONTEXT_KEEP_CHARS", "2400")))
+CONTEXT_SUMMARY_MAX_CHARS = max(300, int(os.getenv("CONTEXT_SUMMARY_MAX_CHARS", "1200")))
+
+# 跨轮会话历史压缩：历史过长时，把最近窗口之外的对话增量摘要并持久化。
+HISTORY_COMPACT_CHARS = max(2000, int(os.getenv("HISTORY_COMPACT_CHARS", "9000")))
+HISTORY_COMPACT_MESSAGES = max(6, int(os.getenv("HISTORY_COMPACT_MESSAGES", "12")))
+HISTORY_KEEP_MESSAGES = max(2, int(os.getenv("HISTORY_KEEP_MESSAGES", "8")))
+HISTORY_SUMMARY_BATCH_MESSAGES = max(
+    1, int(os.getenv("HISTORY_SUMMARY_BATCH_MESSAGES", "4"))
+)

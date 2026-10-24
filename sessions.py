@@ -57,6 +57,9 @@ class SessionStore:
         data.setdefault("updated_at", data["created_at"])
         data.setdefault("messages", [])
         data.setdefault("memory", {})
+        # 较早的对话会被增量压缩到这里，避免每次把全部历史塞进提示词。
+        data.setdefault("history_summary", "")
+        data.setdefault("history_summary_count", 0)
         if not isinstance(data["messages"], list):
             data["messages"] = []
         else:
@@ -66,6 +69,19 @@ class SessionStore:
             ]
         if not isinstance(data["memory"], dict):
             data["memory"] = {}
+        if not isinstance(data["history_summary"], str):
+            data["history_summary"] = ""
+        try:
+            data["history_summary_count"] = max(
+                0, int(data["history_summary_count"])
+            )
+        except (TypeError, ValueError):
+            data["history_summary_count"] = 0
+        data["history_summary_count"] = min(
+            data["history_summary_count"], len(data["messages"])
+        )
+        if not data["history_summary"]:
+            data["history_summary_count"] = 0
         return data
 
     def _write(self, session: dict) -> None:
@@ -85,6 +101,8 @@ class SessionStore:
                 "updated_at": now,
                 "messages": [],
                 "memory": {},
+                "history_summary": "",
+                "history_summary_count": 0,
             }
             self._write(session)
             return session
@@ -156,7 +174,12 @@ class SessionStore:
     # 消息与记忆
     # ------------------------------------------------------------------
 
-    def append_message(self, session_id: str, message: dict) -> dict:
+    def append_message(
+        self,
+        session_id: str,
+        message: dict,
+        updates: dict | None = None,
+    ) -> dict:
         with self._lock:
             session = self.get(session_id)
             if session is None:
@@ -165,6 +188,8 @@ class SessionStore:
             item = dict(message)
             item.setdefault("ts", _now())
             session["messages"].append(item)
+            if updates:
+                session.update(updates)
 
             # 第一条用户消息自动生成会话标题
             if item.get("role") == "user" and session.get("title") == DEFAULT_TITLE:

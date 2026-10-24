@@ -217,6 +217,8 @@ def chat(body: ChatRequest) -> StreamingResponse:
         raise
     session = store.get(session["id"]) or session
     history = session.get("messages", [])[:-1]
+    history_summary = session.get("history_summary", "")
+    history_summary_count = session.get("history_summary_count", 0)
 
     try:
         global_memory = JsonMemory(GLOBAL_MEMORY_FILE).load()
@@ -253,6 +255,8 @@ def chat(body: ChatRequest) -> StreamingResponse:
                 history=history,
                 memory_context=memory_context,
                 cancel_event=cancel_event,
+                history_summary=history_summary,
+                history_summary_count=history_summary_count,
             )
             saved = store.append_message(
                 session_id,
@@ -264,6 +268,11 @@ def chat(body: ChatRequest) -> StreamingResponse:
                     "usage": agent.last_usage,
                     "llm_calls": agent.last_llm_calls,
                     "citations": agent.last_citations,
+                    "compactions": agent.last_compactions,
+                },
+                updates={
+                    "history_summary": agent.last_history_summary,
+                    "history_summary_count": agent.last_history_summary_count,
                 },
             )
             events.put(

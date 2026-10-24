@@ -82,6 +82,23 @@ class TestSessionStore(TempStoreCase):
         self.assertIsNone(self.store.get("../config"))
         self.assertIsNone(self.store.get("not-a-session"))
 
+    def test_history_summary_is_persisted_with_message(self):
+        session = self.store.create()
+        self.store.append_message(
+            session["id"], {"role": "user", "content": "旧问题"}
+        )
+        self.store.append_message(
+            session["id"],
+            {"role": "assistant", "content": "旧回答"},
+            updates={
+                "history_summary": "用户之前问过天气。",
+                "history_summary_count": 2,
+            },
+        )
+        reloaded = SessionStore(self.root / "sessions").get(session["id"])
+        self.assertEqual(reloaded["history_summary"], "用户之前问过天气。")
+        self.assertEqual(reloaded["history_summary_count"], 2)
+
     def test_session_memory_crud(self):
         session = self.store.create()
         self.store.set_memory(session["id"], {"茶": {"value": "龙井", "updated_at": "x"}})
@@ -412,6 +429,58 @@ class TestServerApi(TempStoreCase):
         self.assertEqual(assistant["content"], "现在是北京时间。[来源: https://example.com/time]")
         self.assertEqual(len(assistant["trace"]), 1)
         self.assertEqual(assistant["citations"], ["https://example.com/time"])
+
+    def test_chat_persists_history_summary(self):
+        created = self.client.post("/api/sessions").json()
+        session_id = created["id"]
+        self.store.append_message(
+            session_id, {"role": "user", "content": "旧问题"}
+        )
+        self.store.append_message(
+            session_id,
+            {"role": "assistant", "content": "旧回答"},
+            updates={
+                "history_summary": "旧摘要",
+                "history_summary_count": 2,
+            },
+        )
+        seen_runs: list[tuple] = []
+
+        class FakeAgent:
+            def __init__(self, *args, **kwargs):
+                self.last_trace = []
+                self.last_forced = False
+                self.last_usage = None
+                self.last_llm_calls = 1
+                self.last_citations = []
+                self.last_compactions = 1
+                self.last_history_summary = "更新后的摘要"
+                self.last_history_summary_count = 4
+
+            def run(self, question, **kwargs):
+                seen_runs.append(
+                    (
+                        kwargs.get("history_summary"),
+                        kwargs.get("history_summary_count"),
+                    )
+                )
+                return "好的。"
+
+        with patch.object(server, "ReActAgent", FakeAgent), patch.object(
+            server, "DeepSeekLLM", lambda *a, **kw: object()
+        ):
+            response = self.client.post(
+                "/api/chat",
+                json={"session_id": session_id, "message": "继续"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(seen_runs, [("旧摘要", 2)])
+        session = self.store.get(session_id)
+        self.assertEqual(session["history_summary"], "更新后的摘要")
+        self.assertEqual(session["history_summary_count"], 4)
+        assistant = session["messages"][-1]
+        self.assertEqual(assistant["compactions"], 1)
 
     def test_chat_rejects_unknown_session(self):
         response = self.client.post(
