@@ -388,7 +388,8 @@ class TestServerApi(TempStoreCase):
             [
                 "Thought: 需要查时间。\nAction: get_current_time\n"
                 'Action Input: {"location": "北京"}',
-                "Thought: 完成。\nFinal Answer: 现在是北京时间。",
+                "Thought: 完成。\nFinal Answer: 现在是北京时间。"
+                "[来源: https://example.com/time]",
             ]
         )
 
@@ -408,8 +409,9 @@ class TestServerApi(TempStoreCase):
         roles = [message["role"] for message in session["messages"]]
         self.assertEqual(roles, ["user", "assistant"])
         assistant = session["messages"][1]
-        self.assertEqual(assistant["content"], "现在是北京时间。")
+        self.assertEqual(assistant["content"], "现在是北京时间。[来源: https://example.com/time]")
         self.assertEqual(len(assistant["trace"]), 1)
+        self.assertEqual(assistant["citations"], ["https://example.com/time"])
 
     def test_chat_rejects_unknown_session(self):
         response = self.client.post(

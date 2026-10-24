@@ -518,7 +518,48 @@ function buildUsageLine(usage, forced, llmCalls) {
   return line;
 }
 
-function appendAssistantMessage(content, trace, ts, usage, forced, llmCalls) {
+function buildCitations(citations) {
+  if (!Array.isArray(citations) || !citations.length) return null;
+
+  const wrap = document.createElement("div");
+  wrap.className = "msg-citations";
+  const label = document.createElement("span");
+  label.className = "citations-label";
+  label.textContent = "参考来源";
+  wrap.appendChild(label);
+
+  const seen = new Set();
+  let index = 0;
+  for (const value of citations) {
+    let url;
+    try {
+      url = new URL(String(value));
+    } catch (_) {
+      continue;
+    }
+    if (!["http:", "https:"].includes(url.protocol) || seen.has(url.href)) continue;
+    seen.add(url.href);
+    index += 1;
+    const link = document.createElement("a");
+    link.href = url.href;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.textContent = `[${index}] ${url.href}`;
+    wrap.appendChild(link);
+  }
+
+  return index ? wrap : null;
+}
+
+function appendAssistantMessage(
+  content,
+  trace,
+  ts,
+  usage,
+  forced,
+  llmCalls,
+  citations
+) {
   const msg = document.createElement("div");
   msg.className = "msg assistant";
 
@@ -531,6 +572,9 @@ function appendAssistantMessage(content, trace, ts, usage, forced, llmCalls) {
   bubble.className = "bubble";
   bubble.innerHTML = renderMarkdown(content);
   msg.appendChild(bubble);
+
+  const citationBlock = buildCitations(citations);
+  if (citationBlock) msg.appendChild(citationBlock);
 
   const usageLine = buildUsageLine(usage, forced, llmCalls);
   if (usageLine) msg.appendChild(usageLine);
@@ -564,7 +608,8 @@ function renderHistory(messages) {
         message.ts,
         message.usage,
         message.forced,
-        message.llm_calls
+        message.llm_calls,
+        message.citations
       );
     }
   }
@@ -716,8 +761,11 @@ function handleStreamEvent(event) {
     case "final": {
       refs.bubble.innerHTML = renderMarkdown(event.answer || "");
       if (!refs.steps.size) refs.trace.remove();
-      const oldUsage = refs.msg.querySelector(".msg-usage");
-      if (oldUsage) oldUsage.remove();
+      refs.msg
+        .querySelectorAll(".msg-citations, .msg-usage")
+        .forEach((element) => element.remove());
+      const citationBlock = buildCitations(event.citations);
+      if (citationBlock) refs.msg.appendChild(citationBlock);
       const usageLine = buildUsageLine(
         event.usage,
         event.forced,

@@ -21,6 +21,7 @@ import tools  # noqa: E402
 from agent import (  # noqa: E402
     AgentCancelled,
     ReActAgent,
+    extract_citations,
     parse_action_input,
     parse_output,
 )
@@ -111,6 +112,20 @@ class TestParsing(unittest.TestCase):
     def test_action_input_invalid_for_multi_arg(self):
         with self.assertRaises(ValueError):
             parse_action_input("北京", "unknown_tool")
+
+    def test_extract_citations_dedupes_and_keeps_order(self):
+        text = (
+            "结论 A [来源: https://example.com/a]。\n"
+            "参考来源：\n"
+            "- https://example.com/a\n"
+            "- [论文](https://arxiv.org/abs/2210.03629)\n"
+            "- ftp://example.com/not-http\n"
+        )
+        self.assertEqual(
+            extract_citations(text),
+            ["https://example.com/a", "https://arxiv.org/abs/2210.03629"],
+        )
+        self.assertEqual(extract_citations("没有引用。"), [])
 
 
 class TestTools(unittest.TestCase):
@@ -359,6 +374,26 @@ class TestLoopGuards(unittest.TestCase):
         with self.assertRaises(AgentCancelled):
             agent.run("你好", cancel_event=event)
         self.assertEqual(llm.calls, [])
+
+    def test_final_event_contains_citations(self):
+        events: list[dict] = []
+        llm = FakeLLM(
+            [
+                "Thought: 完成。\n"
+                "Final Answer: 北京晴。[来源: https://example.com/weather]"
+            ]
+        )
+        agent = ReActAgent(
+            llm,
+            max_steps=3,
+            verbose=False,
+            use_color=False,
+            on_event=events.append,
+        )
+        agent.run("北京天气")
+        final = [event for event in events if event["type"] == "final"][0]
+        self.assertEqual(final["citations"], ["https://example.com/weather"])
+        self.assertEqual(agent.last_citations, ["https://example.com/weather"])
 
     def test_usage_is_accumulated_across_calls(self):
         class UsageLLM(FakeLLM):

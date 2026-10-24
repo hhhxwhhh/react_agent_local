@@ -504,6 +504,29 @@ a { color: var(--accent-dark); text-underline-offset: 3px; }
   color: var(--faint);
 }
 
+.msg-citations {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin-top: 10px;
+  padding-top: 7px;
+  border-top: 1px dotted var(--line);
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1.6;
+}
+.msg-citations .citations-label {
+  color: var(--faint);
+  letter-spacing: 0.04em;
+}
+.msg-citations a {
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px dotted var(--line);
+  overflow-wrap: anywhere;
+}
+.msg-citations a:hover { border-bottom-color: var(--accent); }
+
 .msg-usage {
   margin-top: 9px;
   padding-top: 6px;

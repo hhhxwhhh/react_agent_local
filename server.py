@@ -263,6 +263,7 @@ def chat(body: ChatRequest) -> StreamingResponse:
                     "forced": agent.last_forced,
                     "usage": agent.last_usage,
                     "llm_calls": agent.last_llm_calls,
+                    "citations": agent.last_citations,
                 },
             )
             events.put(

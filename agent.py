@@ -174,6 +174,69 @@ def parse_action_input(raw_input: str, tool_name: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
+CITATION_MARKER_RE = re.compile(
+    r"\[来源\s*[:：]\s*(https?://[^\s<>()\[\]\"'，。；、]+)\s*\]",
+    re.I,
+)
+REFERENCE_HEADING_RE = re.compile(
+    r"(?:参考来源|引用来源|References?)\s*[:：]?", re.I
+)
+URL_RE = re.compile(r"https?://[^\s<>()\[\]\"'，。；、]+", re.I)
+
+
+def _clean_url(url: str) -> str:
+    return url.rstrip(".,;:!?，。；：！？、）)]}\"'")
+
+
+def extract_citations(text: str) -> list[str]:
+    """从最终答案中提取模型明确标注的来源 URL。
+
+    支持两种写法：
+    1. 结论后的行内标记：``[来源: https://example.com]``；
+    2. 末尾的“参考来源：”列表（纯 URL 或 Markdown 链接均可）。
+    只保留 http/https，去重并保持出现顺序。
+    """
+    text = str(text or "")
+    urls: list[str] = []
+
+    for match in CITATION_MARKER_RE.finditer(text):
+        urls.append(match.group(1))
+
+    heading = REFERENCE_HEADING_RE.search(text)
+    if heading:
+        for match in URL_RE.finditer(text[heading.end() :]):
+            urls.append(match.group(0))
+
+    result: list[str] = []
+    seen: set[str] = set()
+    for raw in urls:
+        url = _clean_url(raw)
+        if not url.lower().startswith(("http://", "https://")):
+            continue
+        if url not in seen:
+            seen.add(url)
+            result.append(url)
+    return result
+
+
+def _trace_sources(trace: list[dict]) -> list[str]:
+    """模型忘记标注时，至少列出本轮实际 fetch_url 读取过的页面。"""
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in trace:
+        if item.get("tool") != "fetch_url":
+            continue
+        args = item.get("input")
+        url = args.get("url") if isinstance(args, dict) else None
+        if not isinstance(url, str):
+            continue
+        url = _clean_url(url.strip())
+        if url.lower().startswith(("http://", "https://")) and url not in seen:
+            seen.add(url)
+            result.append(url)
+    return result
+
+
 def format_history(
     history: list[dict] | None,
     max_messages: int = 12,
@@ -239,6 +302,7 @@ class ReActAgent:
         self.last_usage: dict | None = None
         self.last_llm_calls = 0
         self.last_finish_reason: str | None = None
+        self.last_citations: list[str] = []
 
         global _COLOR_ENABLED
         _COLOR_ENABLED = use_color
@@ -344,6 +408,7 @@ class ReActAgent:
         self.last_usage = None
         self.last_llm_calls = 0
         self.last_finish_reason = None
+        self.last_citations = []
         reset_usage = getattr(self.llm, "reset_usage", None)
         if callable(reset_usage):
             reset_usage()
@@ -394,6 +459,9 @@ class ReActAgent:
 
             if kind == "final":
                 answer = str(payload).strip()
+                self.last_citations = (
+                    extract_citations(answer) or _trace_sources(self.last_trace)
+                )
                 self._say(_green(f"\nFinal Answer: {answer}"))
                 self._say_usage()
                 self._emit(
@@ -404,6 +472,7 @@ class ReActAgent:
                         "forced": False,
                         "usage": self.last_usage,
                         "llm_calls": self.last_llm_calls,
+                        "citations": self.last_citations,
                     }
                 )
                 return answer
@@ -581,6 +650,9 @@ class ReActAgent:
         if not answer:
             answer = "抱歉，未能在限定轮数内完成该问题。"
         self.last_forced = True
+        self.last_citations = (
+            extract_citations(answer) or _trace_sources(self.last_trace)
+        )
         self._say(_green(f"\nFinal Answer: {answer}"))
         self._say_usage()
         self._emit(
@@ -591,6 +663,7 @@ class ReActAgent:
                 "forced": True,
                 "usage": self.last_usage,
                 "llm_calls": self.last_llm_calls,
+                "citations": self.last_citations,
             }
         )
         return answer
