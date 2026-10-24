@@ -22,8 +22,15 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
-from config import BASE_DIR
+from config import (
+    BASE_DIR,
+    SEMANTIC_RERANK_MIN_ENTRIES,
+    VECTOR_MEMORY_ENABLED,
+    VECTOR_MIN_SCORE,
+    VECTOR_SEARCH_LIMIT,
+)
 from storage import atomic_write_json, lock_for
+from vector_memory import entry_text, get_store, lexical_overlap, relevance_scores
 
 DATA_DIR = BASE_DIR / "data"
 GLOBAL_MEMORY_FILE = DATA_DIR / "memory.json"
@@ -44,6 +51,8 @@ CONTEXT_VALUE_CHARS = 200
 RECALL_MAX_ITEMS = 50
 # recall 的列表输出要低于 run_tool 的 3000 字符观测上限，避免末尾提示被截掉。
 RECALL_LIST_BUDGET = 2400
+# 语义检索结果里展示的单条 value 长度。
+SEARCH_VALUE_CHARS = 240
 
 T = TypeVar("T")
 
@@ -213,6 +222,15 @@ class JsonMemory:
             self._write_unlocked(memories)
             return True
 
+    @property
+    def vector_namespace(self) -> tuple[str, str]:
+        return ("global", "")
+
+    def vector_store(self):
+        # 与记忆 JSON 放在同一目录：生产环境是 data/vector_memory.db，
+        # 测试里用临时目录的 memory.json 时也会自动隔离。
+        return get_store(self.path.parent / "vector_memory.db")
+
 
 class SessionMemory:
     """会话记忆后端（委托给 SessionStore）。"""
@@ -237,6 +255,15 @@ class SessionMemory:
 
     def remove(self, key: str) -> bool:
         return bool(self.store.remove_memory(self.session_id, key))
+
+    @property
+    def vector_namespace(self) -> tuple[str, str]:
+        return ("session", str(self.session_id))
+
+    def vector_store(self):
+        root = getattr(self.store, "root", None)
+        base = Path(root).parent if root is not None else DATA_DIR
+        return get_store(base / "vector_memory.db")
 
 
 def _validate_key_value(key: str, value: str) -> tuple[str, str]:
@@ -391,6 +418,94 @@ def forget_entry(backend: Any, key: str) -> str:
     return f"已删除记忆：{key}"
 
 
+def _keyword_search(
+    memories: dict[str, dict],
+    query: str,
+    limit: int,
+) -> list[dict]:
+    """向量索引不可用时的确定性兜底：按键名、子串和 token 重合排序。"""
+    normalized = query.casefold()
+    results: list[dict] = []
+    for key, item in memories.items():
+        value = str(item.get("value", ""))
+        key_normalized = key.casefold()
+        score = max(
+            1.0 if normalized == key_normalized else 0.0,
+            0.85
+            if normalized in key_normalized or key_normalized in normalized
+            else 0.0,
+            0.75 if normalized in value.casefold() else 0.0,
+            lexical_overlap(query, entry_text(key, value)),
+        )
+        if score < VECTOR_MIN_SCORE:
+            continue
+        results.append(
+            {
+                "key": key,
+                "value": _entry_value(item, SEARCH_VALUE_CHARS),
+                "updated_at": str(item.get("updated_at", "未知")),
+                "score": round(score, 6),
+                "cosine": 0.0,
+                "lexical": round(score, 6),
+            }
+        )
+    results.sort(key=lambda item: (item["score"], item["updated_at"]), reverse=True)
+    return results[:limit]
+
+
+def search_memory_entry(
+    backend: Any,
+    query: str,
+    limit: int | None = None,
+) -> list[dict]:
+    """按相似度检索一个记忆范围，返回实时校验过的命中。
+
+    索引只是派生缓存：命中后还要回到 backend 的当前记忆里确认 key 仍然存在、
+    未过期，并把 value 换成最新值。这样删除、手工修改和 TTL 过期都不会
+    被旧向量“复活”。
+    """
+    query = str(query or "").strip()
+    if not query:
+        raise ValueError("检索词不能为空")
+    limit = max(1, min(int(limit or VECTOR_SEARCH_LIMIT), 20))
+
+    memories = backend.load()
+    active = {key: item for key, item in _active_entries(memories)}
+    scope, session_id = backend.vector_namespace
+
+    hits: list[dict] = []
+    if VECTOR_MEMORY_ENABLED:
+        try:
+            store = backend.vector_store()
+            store.sync(scope, session_id, active)
+            hits = store.search(query, [(scope, session_id)], limit=limit)
+        except Exception:
+            # SQLite 损坏、磁盘只读等情况下退化为关键词检索，不影响记忆读取。
+            hits = []
+
+    if not hits:
+        hits = _keyword_search(active, query, limit)
+
+    results: list[dict] = []
+    for hit in hits:
+        item = active.get(hit["key"])
+        if item is None:
+            continue
+        results.append(
+            {
+                "scope": scope,
+                "session_id": session_id,
+                "key": hit["key"],
+                "value": _entry_value(item, SEARCH_VALUE_CHARS),
+                "updated_at": str(item.get("updated_at", "未知")),
+                "score": hit["score"],
+                "cosine": hit.get("cosine", 0.0),
+                "lexical": hit.get("lexical", 0.0),
+            }
+        )
+    return results
+
+
 def _render_block(
     title: str,
     entries: list[tuple[str, dict]],
@@ -418,22 +533,48 @@ def _render_block(
 
     omitted = len(entries) - injected
     if omitted:
-        marker = f"...（另有 {omitted} 条未注入，可用 recall 查看）"
+        marker = f"...（另有 {omitted} 条未注入，可用 recall 或 search_memory 查看）"
         if used + len(marker) + 1 <= budget or injected == 0:
             lines.append(marker)
 
     return "\n".join(lines), injected
 
 
+def _rerank_entries(
+    query: str,
+    entries: list[tuple[str, dict]],
+) -> list[tuple[str, dict]]:
+    """按与当前问题的相关度重排；同分时保留原来的“越新越前”。"""
+    if len(entries) < 2:
+        return entries
+    texts = [
+        entry_text(key, _entry_value(item, 300)) for key, item in entries
+    ]
+    try:
+        scores = relevance_scores(query, texts)
+    except Exception:
+        return entries
+    order = sorted(
+        range(len(entries)),
+        key=lambda index: (scores[index], -index),
+        reverse=True,
+    )
+    return [entries[index] for index in order]
+
+
 def format_memory_context(
     global_memories: dict[str, dict],
     session_memories: dict[str, dict],
     max_chars: int = CONTEXT_MAX_CHARS,
+    query: str = "",
 ) -> str:
     """把记忆压缩成可注入提示词的文本。
 
     会话记忆优先：先给它 60% 预算（至少 400 字符），再把剩余预算给全局
     记忆。旧实现先拼全局再整体截断，全局记忆一多就会把会话记忆挤没。
+
+    传入 query 时，如果记忆较多，会先按“向量相似度 + 字面重合”重排，
+    让预算优先给与当前问题相关的条目；条目很少时仍按更新时间排列。
     """
     try:
         max_chars = max(200, int(max_chars))
@@ -445,6 +586,15 @@ def format_memory_context(
     global_entries = _active_entries(global_memories, now)
     if not session_entries and not global_entries:
         return ""
+
+    query = str(query or "").strip()
+    if (
+        query
+        and VECTOR_MEMORY_ENABLED
+        and len(session_entries) + len(global_entries) >= SEMANTIC_RERANK_MIN_ENTRIES
+    ):
+        session_entries = _rerank_entries(query, session_entries)
+        global_entries = _rerank_entries(query, global_entries)
 
     parts: list[str] = []
     if session_entries and global_entries:

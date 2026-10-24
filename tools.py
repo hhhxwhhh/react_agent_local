@@ -18,6 +18,7 @@ import socket
 import urllib.parse
 import xml.etree.ElementTree as ET
 from datetime import date, datetime, timedelta
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -32,6 +33,7 @@ from memory import (
     forget_entry,
     recall_entry,
     remember_entry,
+    search_memory_entry,
 )
 from tool_context import ToolContext
 
@@ -786,6 +788,655 @@ def get_current_time(location: str = "Asia/Shanghai") -> str:
 
 
 # ---------------------------------------------------------------------------
+# 位置工具（基于公网 IP 的粗略定位，无需 Key）
+#
+# 注意：这不是 GPS。它只能根据公网 IP 推断到城市级，且代理/VPN 会改变结果。
+# 服务端拿不到浏览器的精确经纬度，除非前端显式请求用户授权后再上报。
+# ---------------------------------------------------------------------------
+
+IP_GEOLOCATION_TIMEOUT = 10
+
+
+def _validate_lookup_ip(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        address = ipaddress.ip_address(text)
+    except ValueError as exc:
+        raise ValueError(f"IP 地址格式不正确：{text}") from exc
+    if not address.is_global:
+        raise ValueError(
+            "这是内网、回环或保留地址，无法通过公网 IP 定位；"
+            "请留空以查询当前出口 IP，或传入一个公网 IP。"
+        )
+    return str(address)
+
+
+def _lookup_ip_data(ip: str) -> dict:
+    """依次尝试两个免费 IP 定位服务，返回统一字段。"""
+    target = urllib.parse.quote(ip) if ip else ""
+    errors: list[str] = []
+
+    try:
+        response = requests.get(
+            f"https://ipwho.is/{target}",
+            headers=HEADERS,
+            timeout=IP_GEOLOCATION_TIMEOUT,
+        )
+        response.raise_for_status()
+        data = response.json()
+        if data.get("success") is False:
+            raise RuntimeError(str(data.get("message") or "服务返回失败"))
+        if data.get("ip"):
+            connection = data.get("connection") or {}
+            timezone = data.get("timezone") or {}
+            return {
+                "provider": "ipwho.is",
+                "ip": data.get("ip", ""),
+                "city": data.get("city", ""),
+                "region": data.get("region", ""),
+                "country": data.get("country", ""),
+                "country_code": data.get("country_code", ""),
+                "latitude": data.get("latitude"),
+                "longitude": data.get("longitude"),
+                "timezone": timezone.get("id", ""),
+                "isp": connection.get("isp", ""),
+                "org": connection.get("org", ""),
+            }
+    except (requests.RequestException, ValueError, RuntimeError) as exc:
+        errors.append(f"ipwho.is: {exc}")
+
+    try:
+        path = f"{target}/json/" if target else "json/"
+        response = requests.get(
+            f"https://ipapi.co/{path}",
+            headers=HEADERS,
+            timeout=IP_GEOLOCATION_TIMEOUT,
+        )
+        response.raise_for_status()
+        data = response.json()
+        if data.get("error"):
+            raise RuntimeError(str(data.get("reason") or "服务返回失败"))
+        if data.get("ip"):
+            return {
+                "provider": "ipapi.co",
+                "ip": data.get("ip", ""),
+                "city": data.get("city", ""),
+                "region": data.get("region", ""),
+                "country": data.get("country_name", ""),
+                "country_code": data.get("country_code", ""),
+                "latitude": data.get("latitude"),
+                "longitude": data.get("longitude"),
+                "timezone": data.get("timezone", ""),
+                "isp": data.get("org", ""),
+                "org": data.get("org", ""),
+            }
+    except (requests.RequestException, ValueError, RuntimeError) as exc:
+        errors.append(f"ipapi.co: {exc}")
+
+    raise RuntimeError("IP 定位服务暂时不可用（" + "；".join(errors) + "）")
+
+
+def _format_coordinates(latitude: Any, longitude: Any) -> str:
+    try:
+        return f"{float(latitude):.4f}, {float(longitude):.4f}"
+    except (TypeError, ValueError):
+        return "未知"
+
+
+NOMINATIM_REVERSE_URL = "https://nominatim.openstreetmap.org/reverse"
+
+
+@lru_cache(maxsize=128)
+def _reverse_geocode_cached(latitude: float, longitude: float) -> str:
+    """把 GPS 坐标反查成“国家，省，市”。失败由调用方降级为只显示坐标。"""
+    info = _reverse_lookup(latitude, longitude)
+    parts = list(info.get("parts") or [])
+    if parts:
+        return "，".join(parts[:3])
+    return str(info.get("display_name") or "").strip()
+
+
+def _format_gps_location(location: dict) -> str:
+    """把浏览器 geolocation 的坐标格式化成 Observation。"""
+    try:
+        latitude = float(location.get("latitude"))
+        longitude = float(location.get("longitude"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("GPS 坐标格式不正确") from exc
+    if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+        raise ValueError("GPS 坐标超出有效范围")
+
+    place = ""
+    try:
+        place = _reverse_geocode_cached(round(latitude, 3), round(longitude, 3))
+    except Exception:
+        place = ""
+
+    lines = ["定位来源：设备 GPS/浏览器定位（用户已授权，本次请求有效）"]
+    if place:
+        lines.append(f"大致位置：{place}（OpenStreetMap 反向地理编码）")
+    else:
+        lines.append("大致位置：未知（反向地理编码失败，但坐标仍然有效）")
+    lines.append(f"坐标：{latitude:.6f}, {longitude:.6f}")
+
+    accuracy = location.get("accuracy")
+    if accuracy not in (None, ""):
+        try:
+            meters = max(0.0, float(accuracy))
+            lines.append(f"精度：约 ±{meters:.0f} 米（浏览器给出的 68% 置信半径）")
+            if meters > 1000:
+                lines.append(
+                    "提示：精度较低，浏览器可能在使用 Wi-Fi/基站定位，而不是真正的 GPS。"
+                )
+        except (TypeError, ValueError):
+            pass
+
+    lines.append(
+        "说明：这是浏览器提供的设备定位，通常比公网 IP 精确；坐标会发送给 "
+        "OpenStreetMap Nominatim 做反向地理编码。坐标只在本次请求内使用，"
+        "不会自动写入长期记忆。"
+    )
+    return "\n".join(lines)
+
+
+def _format_ip_location(target: str) -> str:
+    data = _lookup_ip_data(target)
+
+    region = str(data.get("region") or "").strip()
+    city = str(data.get("city") or "").strip()
+    country = str(data.get("country") or "").strip()
+    code = str(data.get("country_code") or "").strip()
+    country_label = f"{country}（{code}）" if country and code else country
+    place = "，".join(part for part in (country_label, region, city) if part)
+
+    lines = [
+        f"大致位置：{place or '未知'}",
+        f"坐标：{_format_coordinates(data.get('latitude'), data.get('longitude'))}"
+        "（基于公网 IP 的城市级估算，不是 GPS 坐标）",
+        f"公网 IP：{data.get('ip') or target or '未知'}",
+    ]
+
+    network = str(data.get("isp") or data.get("org") or "").strip()
+    if network:
+        lines.append(f"网络运营商/组织：{network}")
+
+    timezone_name = str(data.get("timezone") or "").strip()
+    if timezone_name:
+        try:
+            tz = ZoneInfo(timezone_name)
+            now = datetime.now(tz)
+            offset = now.utcoffset() or timedelta(0)
+            total_minutes = int(offset.total_seconds() // 60)
+            sign = "+" if total_minutes >= 0 else "-"
+            hours, minutes = divmod(abs(total_minutes), 60)
+            lines.append(
+                f"时区：{timezone_name}（当前 {now:%Y-%m-%d %H:%M:%S}，"
+                f"UTC{sign}{hours:02d}:{minutes:02d}）"
+            )
+        except (ZoneInfoNotFoundError, ValueError):
+            lines.append(f"时区：{timezone_name}")
+
+    lines.append(
+        "说明：结果由第三方 IP 地理定位服务（"
+        f"{data.get('provider', '未知')}）提供，通常只能精确到城市；"
+        "使用代理或 VPN 时显示的是出口节点位置。"
+    )
+    return "\n".join(lines)
+
+
+def get_location(ip: str = "", *, context: ToolContext | None = None) -> str:
+    """获取设备 GPS 位置，或公网 IP 的城市级大致位置。
+
+    优先级：
+    1. 显式传入 ip：按 IP 查询（即使已有 GPS 坐标）；
+    2. 本次请求已带有坐标：直接使用；
+    3. Web 模式：通过回调请求用户授权，授权后使用 GPS 坐标；
+    4. 拒绝授权、超时或 CLI 模式：回退到当前出口 IP 的城市级定位。
+    """
+    target = _validate_lookup_ip(ip)
+    if target:
+        return _format_ip_location(target)
+
+    if context is not None:
+        if context.user_location:
+            return _format_gps_location(context.user_location)
+
+        requester = getattr(context, "request_user_location", None)
+        if callable(requester):
+            coords = requester()
+            if coords:
+                return _format_gps_location(coords)
+            return _format_ip_location("") + (
+                "\n提示：用户未授权浏览器定位（或授权超时），"
+                "以上是公网 IP 的城市级估算。"
+            )
+
+    text = _format_ip_location("")
+    if context is not None and context.session_store is not None:
+        text += (
+            "\n提示：当前未获得浏览器定位授权，以上是公网 IP 的城市级估算。"
+        )
+    return text
+
+
+# ---------------------------------------------------------------------------
+# 地理处理工具（坐标 ↔ 地址、距离/方位；除地理编码外均为本地计算）
+# ---------------------------------------------------------------------------
+
+NOMINATIM_SEARCH_URL = "https://nominatim.openstreetmap.org/search"
+BIGDATACLOUD_REVERSE_URL = (
+    "https://api.bigdatacloud.net/data/reverse-geocode-client"
+)
+GEO_LOOKUP_TIMEOUT = 8
+
+
+def _validate_coordinates(latitude: Any, longitude: Any) -> tuple[float, float]:
+    try:
+        lat = float(latitude)
+        lon = float(longitude)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("经纬度必须是数字") from exc
+    if not (-90 <= lat <= 90):
+        raise ValueError(f"纬度必须在 -90 到 90 之间，收到 {lat}")
+    if not (-180 <= lon <= 180):
+        raise ValueError(f"经度必须在 -180 到 180 之间，收到 {lon}")
+    return lat, lon
+
+
+def _parse_coordinate_pair(value: str) -> tuple[float, float]:
+    """解析“纬度,经度”，允许中英文逗号、分号或空格分隔。"""
+    text = str(value or "").strip()
+    parts = [part for part in re.split(r"[,，;\s]+", text) if part]
+    if len(parts) != 2:
+        raise ValueError(
+            f"坐标“{value}”格式不正确，应为“纬度,经度”，例如 30.2741,120.1551"
+        )
+    return _validate_coordinates(parts[0], parts[1])
+
+
+@lru_cache(maxsize=128)
+def _reverse_geocode_detail_cached(latitude: float, longitude: float) -> dict:
+    """Nominatim 反向地理编码，返回完整地址与行政区划。"""
+    response = requests.get(
+        NOMINATIM_REVERSE_URL,
+        params={
+            "lat": f"{latitude:.4f}",
+            "lon": f"{longitude:.4f}",
+            "format": "jsonv2",
+            "zoom": 18,
+            "addressdetails": 1,
+            "accept-language": "zh-CN",
+        },
+        headers=HEADERS,
+        timeout=GEO_LOOKUP_TIMEOUT,
+    )
+    response.raise_for_status()
+    data = response.json()
+    address = data.get("address") or {}
+
+    parts: list[str] = []
+    for key in (
+        "country",
+        "state",
+        "county",
+        "city",
+        "town",
+        "village",
+        "city_district",
+        "suburb",
+        "road",
+        "house_number",
+    ):
+        value = str(address.get(key) or "").strip()
+        if value and value not in parts:
+            parts.append(value)
+
+    display = str(data.get("display_name") or "").strip()
+    if not display and parts:
+        display = "，".join(parts)
+    if not display:
+        raise RuntimeError("Nominatim 没有返回可读地址")
+    return {
+        "display_name": display,
+        "parts": tuple(parts),
+        "timezone": "",
+        "provider": "OpenStreetMap Nominatim",
+    }
+
+
+@lru_cache(maxsize=128)
+def _reverse_lookup(latitude: float, longitude: float) -> dict:
+    """按可用性依次尝试反向地理编码服务，返回统一结构。"""
+    errors: list[str] = []
+    for provider in (_bigdatacloud_reverse, _reverse_geocode_detail_cached):
+        try:
+            return provider(latitude, longitude)
+        except Exception as exc:
+            errors.append(f"{provider.__name__}: {exc}")
+    raise RuntimeError("反向地理编码服务暂时不可用（" + "；".join(errors) + "）")
+
+
+@lru_cache(maxsize=128)
+def _bigdatacloud_reverse(latitude: float, longitude: float) -> dict:
+    """BigDataCloud 免费反向地理编码（无需 Key），返回行政区与可读地址。"""
+    response = requests.get(
+        BIGDATACLOUD_REVERSE_URL,
+        params={
+            "latitude": f"{latitude:.4f}",
+            "longitude": f"{longitude:.4f}",
+            "localityLanguage": "zh",
+        },
+        headers=HEADERS,
+        timeout=GEO_LOOKUP_TIMEOUT,
+    )
+    response.raise_for_status()
+    data = response.json()
+
+    parts: list[str] = []
+    administrative = (
+        (data.get("localityInfo") or {}).get("administrative") or []
+    )
+    for item in sorted(
+        administrative,
+        key=lambda entry: entry.get("order") or 0,
+    ):
+        value = str(item.get("name") or "").strip()
+        if value and value not in parts:
+            parts.append(value)
+    for key in ("countryName", "principalSubdivision", "city", "locality"):
+        value = str(data.get(key) or "").strip()
+        if value and value not in parts:
+            parts.append(value)
+
+    if not parts:
+        raise RuntimeError("BigDataCloud 没有返回可读地址")
+
+    timezone = ""
+    for item in (data.get("localityInfo") or {}).get("informative") or []:
+        name = str(item.get("name") or "")
+        if "/" in name:
+            timezone = name
+            break
+
+    return {
+        "display_name": "，".join(parts),
+        "parts": tuple(parts),
+        "timezone": timezone,
+        "provider": "BigDataCloud",
+    }
+
+
+def _geocode_query_variants(query: str) -> list[str]:
+    """为中文复合地名生成候选查询，例如“杭州西湖”→ 杭州、西湖。"""
+    variants = [query]
+    stripped = re.sub(
+        r"(特别行政区|自治区|自治州|地区|市|省|区|县)$", "", query
+    ).strip()
+    if stripped and stripped != query:
+        variants.append(stripped)
+    if re.fullmatch(r"[一-鿿]{4,10}", query):
+        for piece in (query[:2], query[-2:], query[-3:]):
+            if len(piece) >= 2 and piece not in variants:
+                variants.append(piece)
+    return variants[:5]
+
+
+def _open_meteo_geocode(query: str, limit: int) -> list[dict]:
+    response = requests.get(
+        GEOCODING_URL,
+        params={
+            "name": query,
+            "count": limit,
+            "language": "zh",
+            "format": "json",
+        },
+        headers=HEADERS,
+        timeout=GEO_LOOKUP_TIMEOUT,
+    )
+    response.raise_for_status()
+
+    results: list[dict] = []
+    for item in (response.json().get("results") or [])[:limit]:
+        try:
+            latitude, longitude = _validate_coordinates(
+                item.get("latitude"), item.get("longitude")
+            )
+        except (AttributeError, ValueError):
+            continue
+        region = " ".join(
+            str(item.get(key) or "").strip()
+            for key in ("country", "admin1")
+            if item.get(key)
+        )
+        results.append(
+            {
+                "name": " ".join(
+                    part
+                    for part in (str(item.get("name") or "").strip(), region)
+                    if part
+                ),
+                "latitude": latitude,
+                "longitude": longitude,
+                "type": str(item.get("feature_code") or ""),
+                "provider": "Open-Meteo Geocoding",
+            }
+        )
+    return results
+
+
+def _nominatim_geocode(query: str, limit: int) -> list[dict]:
+    response = requests.get(
+        NOMINATIM_SEARCH_URL,
+        params={
+            "q": query,
+            "format": "jsonv2",
+            "limit": limit,
+            "addressdetails": 1,
+            "accept-language": "zh-CN",
+        },
+        headers=HEADERS,
+        timeout=(3, GEO_LOOKUP_TIMEOUT),
+    )
+    response.raise_for_status()
+
+    results: list[dict] = []
+    items = response.json()
+    for item in items[:limit] if isinstance(items, list) else []:
+        try:
+            latitude, longitude = _validate_coordinates(
+                item.get("lat"), item.get("lon")
+            )
+        except (AttributeError, ValueError):
+            continue
+        label = str(item.get("display_name") or item.get("name") or "").strip()
+        if not label:
+            continue
+        results.append(
+            {
+                "name": label,
+                "latitude": latitude,
+                "longitude": longitude,
+                "type": str(item.get("type") or ""),
+                "provider": "OpenStreetMap Nominatim",
+            }
+        )
+    return results
+
+
+@lru_cache(maxsize=128)
+def _forward_geocode_cached(query: str, limit: int) -> tuple[dict, ...]:
+    """地名/地址 → 候选坐标。Open-Meteo 优先，地址回退 Nominatim。"""
+    errors: list[str] = []
+    results: list[dict] = []
+    seen: set[tuple[float, float]] = set()
+
+    for variant in _geocode_query_variants(query):
+        if len(results) >= limit:
+            break
+        try:
+            found = _open_meteo_geocode(variant, limit)
+        except (requests.RequestException, ValueError) as exc:
+            errors.append(f"Open-Meteo({variant}): {exc}")
+            continue
+        for item in found:
+            key = (round(item["latitude"], 5), round(item["longitude"], 5))
+            if key in seen:
+                continue
+            seen.add(key)
+            results.append(item)
+            if len(results) >= limit:
+                break
+
+    if results:
+        return tuple(results)
+
+    try:
+        found = _nominatim_geocode(query, limit)
+        if found:
+            return tuple(found)
+        errors.append("Nominatim: 没有匹配结果")
+    except (requests.RequestException, ValueError) as exc:
+        errors.append(f"Nominatim: {exc}")
+
+    raise RuntimeError(
+        f"未找到“{query}”对应的地点（{'；'.join(errors)}）。"
+        "如果输入是复合地名（例如“杭州西湖”），请拆成单个地名分别查询。"
+    )
+
+
+_EARTH_RADIUS_KM = 6371.0088
+
+
+def _haversine_km(
+    lat1: float, lon1: float, lat2: float, lon2: float
+) -> float:
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    d_phi = math.radians(lat2 - lat1)
+    d_lambda = math.radians(lon2 - lon1)
+    a = (
+        math.sin(d_phi / 2) ** 2
+        + math.cos(phi1) * math.cos(phi2) * math.sin(d_lambda / 2) ** 2
+    )
+    return 2 * _EARTH_RADIUS_KM * math.asin(math.sqrt(a))
+
+
+def _initial_bearing(
+    lat1: float, lon1: float, lat2: float, lon2: float
+) -> float:
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    d_lambda = math.radians(lon2 - lon1)
+    x = math.sin(d_lambda) * math.cos(phi2)
+    y = math.cos(phi1) * math.sin(phi2) - math.sin(phi1) * math.cos(
+        phi2
+    ) * math.cos(d_lambda)
+    return (math.degrees(math.atan2(x, y)) + 360) % 360
+
+
+def _midpoint(
+    lat1: float, lon1: float, lat2: float, lon2: float
+) -> tuple[float, float]:
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    d_lambda = math.radians(lon2 - lon1)
+    bx = math.cos(phi2) * math.cos(d_lambda)
+    by = math.cos(phi2) * math.sin(d_lambda)
+    phi3 = math.atan2(
+        math.sin(phi1) + math.sin(phi2),
+        math.sqrt((math.cos(phi1) + bx) ** 2 + by**2),
+    )
+    lam3 = math.radians(lon1) + math.atan2(
+        by, math.cos(phi1) + bx
+    )
+    return (
+        math.degrees(phi3),
+        (math.degrees(lam3) + 540) % 360 - 180,
+    )
+
+
+_COMPASS = ("北", "东北", "东", "东南", "南", "西南", "西", "西北")
+
+
+def _compass_label(bearing: float) -> str:
+    return _COMPASS[int((bearing + 22.5) % 360 // 45)]
+
+
+def _format_distance(origin: str, destination: str) -> str:
+    lat1, lon1 = _parse_coordinate_pair(origin)
+    lat2, lon2 = _parse_coordinate_pair(destination)
+    km = _haversine_km(lat1, lon1, lat2, lon2)
+    bearing = _initial_bearing(lat1, lon1, lat2, lon2)
+    mid_lat, mid_lon = _midpoint(lat1, lon1, lat2, lon2)
+
+    distance = f"{km * 1000:.0f} 米" if km < 1 else f"{km:.2f} 公里"
+    return "\n".join(
+        [
+            f"直线距离：{distance}（球面距离，不是驾车/步行路线）",
+            f"方位角：{bearing:.1f}°（{_compass_label(bearing)}）",
+            f"中点：{mid_lat:.6f}, {mid_lon:.6f}",
+            f"起点：{lat1:.6f}, {lon1:.6f}",
+            f"终点：{lat2:.6f}, {lon2:.6f}",
+        ]
+    )
+
+
+def geo_lookup(
+    operation: str = "",
+    latitude: float | None = None,
+    longitude: float | None = None,
+    query: str = "",
+    origin: str = "",
+    destination: str = "",
+    limit: int = 5,
+) -> str:
+    """地理处理：坐标反查地址、地名转坐标、两点距离/方位。"""
+    op = str(operation or "").strip().lower()
+    if op in {"reverse", "regeo", "反向"}:
+        if latitude is None or longitude is None:
+            raise ValueError("operation=reverse 时需要 latitude 和 longitude")
+        lat, lon = _validate_coordinates(latitude, longitude)
+        info = _reverse_lookup(round(lat, 4), round(lon, 4))
+        lines = [
+            f"地址：{info['display_name']}",
+            f"坐标：{lat:.6f}, {lon:.6f}",
+            f"来源：{info['provider']} 反向地理编码",
+        ]
+        if info.get("timezone"):
+            lines.append(f"时区：{info['timezone']}")
+        return "\n".join(lines)
+
+    if op in {"forward", "search", "geocode", "正向"}:
+        text = str(query or "").strip()
+        if not text:
+            raise ValueError("operation=forward 时需要 query（地名、地址或地标）")
+        count = max(1, min(10, int(limit)))
+        results = _forward_geocode_cached(text, count)
+        lines = [f"找到 {len(results)} 个候选地点："]
+        for index, item in enumerate(results, 1):
+            lines.append(
+                f"{index}. {item['name']}（{item['latitude']:.6f}, "
+                f"{item['longitude']:.6f}）"
+            )
+        lines.append(
+            f"来源：{results[0]['provider']}。候选按相关度排序，使用前请核对。"
+        )
+        return "\n".join(lines)
+
+    if op in {"distance", "距离"}:
+        if not str(origin).strip() or not str(destination).strip():
+            raise ValueError(
+                "operation=distance 时需要 origin 和 destination，"
+                "格式为“纬度,经度”"
+            )
+        return _format_distance(origin, destination)
+
+    raise ValueError(
+        "operation 必须是 reverse（坐标→地址）、forward（地址→坐标）"
+        "或 distance（两点距离）"
+    )
+
+
+# ---------------------------------------------------------------------------
 # 日期计算工具（本地计算）
 # ---------------------------------------------------------------------------
 
@@ -1275,6 +1926,56 @@ def forget(
     return f"{message}（{label}记忆）"
 
 
+def search_memory(
+    query: str,
+    scope: str = "auto",
+    limit: int = 5,
+    *,
+    context: ToolContext | None = None,
+) -> str:
+    """按相似度检索长期记忆，适合不确定 key 或记忆条目很多时使用。"""
+    query = str(query or "").strip()
+    if not query:
+        raise ValueError("检索词不能为空")
+
+    ctx = context or ToolContext()
+    requested = str(scope or "auto").strip().lower()
+    if requested in {"", "auto"}:
+        requested = ctx.default_scope
+    if requested not in {"session", "global", "all"}:
+        raise ValueError("scope 只支持 session、global 或 all")
+
+    backends = []
+    has_session = bool(ctx.session_id and ctx.session_store is not None)
+    if requested in {"session", "all"} and has_session:
+        backends.append(SessionMemory(ctx.session_store, ctx.session_id or ""))
+    if requested in {"global", "all"}:
+        backends.append(JsonMemory(GLOBAL_MEMORY_FILE))
+    if not backends:
+        backends.append(JsonMemory(GLOBAL_MEMORY_FILE))
+
+    limit = max(1, min(int(limit), 10))
+    hits: list[dict] = []
+    for backend in backends:
+        hits.extend(search_memory_entry(backend, query, limit=limit))
+    hits.sort(key=lambda item: item["score"], reverse=True)
+    hits = hits[:limit]
+
+    if not hits:
+        suffix = "" if requested == "all" or not has_session else "；可试试 scope=\"all\" 同时检索全局记忆"
+        return f"没有检索到与“{query}”相关的记忆{suffix}。可先用 recall 列出记忆或换一个说法。"
+
+    lines = [f"语义检索“{query}”命中 {len(hits)} 条记忆（按相关度排序）："]
+    for index, hit in enumerate(hits, 1):
+        label = "本会话" if hit["scope"] == "session" else "全局"
+        lines.append(
+            f"{index}. [{label}] {hit['key']}（相关度 {hit['score']:.2f}）："
+            f"{hit['value']}"
+        )
+    lines.append("提示：相关度来自本地向量索引 + 字面重合并，只用于排序；以记忆内容本身为准。")
+    return "\n".join(lines)
+
+
 def forget_memory(key: str) -> str:
     """删除一条全局长期记忆（CLI 内部命令使用）。"""
     return forget_entry(JsonMemory(GLOBAL_MEMORY_FILE), key)
@@ -1405,6 +2106,58 @@ TOOL_SPECS: dict[str, dict] = {
                 }
             },
             "required": [],
+        },
+    },
+    "get_location": {
+        "description": "获取位置。在 Web 界面首次调用时会请求用户授权浏览器定位：用户允许后返回设备 GPS 精确坐标（精度以米计）；拒绝或超时则回退到公网 IP 的城市级估算（国家、省/州、城市、经纬度、时区、运营商）。显式传 ip 时按该 IP 查询，不会请求定位授权。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "ip": {
+                    "type": "string",
+                    "description": "可选：要查询的公网 IP（IPv4/IPv6）。留空时优先使用浏览器 GPS；没有授权则查询当前出口 IP。内网/回环地址无法定位。",
+                }
+            },
+            "required": [],
+        },
+        "context": True,
+    },
+    "geo_lookup": {
+        "description": "地理处理（无需 Key）。reverse：经纬度→详细地址；forward：地名/地址/地标→候选经纬度；distance：两点直线距离、方位角和中点。用户自己给出坐标时用本工具，不会触发浏览器定位授权。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "operation": {
+                    "type": "string",
+                    "enum": ["reverse", "forward", "distance"],
+                    "description": "reverse=坐标转地址；forward=地址转坐标；distance=两点距离",
+                },
+                "latitude": {
+                    "type": "number",
+                    "description": "operation=reverse 时的纬度",
+                },
+                "longitude": {
+                    "type": "number",
+                    "description": "operation=reverse 时的经度",
+                },
+                "query": {
+                    "type": "string",
+                    "description": "operation=forward 时的地名、地址或地标",
+                },
+                "origin": {
+                    "type": "string",
+                    "description": "operation=distance 时的起点，格式“纬度,经度”",
+                },
+                "destination": {
+                    "type": "string",
+                    "description": "operation=distance 时的终点，格式“纬度,经度”",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "forward 返回的候选数量，1-10，默认 5",
+                },
+            },
+            "required": ["operation"],
         },
     },
     "date_calc": {
@@ -1568,6 +2321,28 @@ TOOL_SPECS: dict[str, dict] = {
         },
         "context": True,
     },
+    "search_memory": {
+        "description": "按相似度检索长期记忆（本地向量索引 + 关键词混合）。当记忆条目很多、recall 列不全，或不确定记忆使用的 key 时使用；返回最相关的若干条及相关度。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "自然语言检索词，例如“用户平时喝什么茶”“上次讨论的项目结论”",
+                },
+                "scope": {
+                    "type": "string",
+                    "description": "session（本对话）、global（跨对话）、all（两者都查）；省略时使用当前默认范围",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "返回条数，1-10，默认 5",
+                },
+            },
+            "required": ["query"],
+        },
+        "context": True,
+    },
     "forget": {
         "description": "删除一条长期记忆。只在用户明确要求“忘记/删除/别再记住”时调用；不要未经确认批量删除。",
         "parameters": {
@@ -1610,6 +2385,8 @@ TOOL_FUNCS: dict[str, Callable[..., str]] = {
     "fetch_url": fetch_url,
     "calculate": calculate,
     "get_current_time": get_current_time,
+    "get_location": get_location,
+    "geo_lookup": geo_lookup,
     "date_calc": date_calc,
     "convert_units": convert_units,
     "list_files": list_files,
@@ -1618,6 +2395,7 @@ TOOL_FUNCS: dict[str, Callable[..., str]] = {
     "search_files": search_files,
     "remember": remember,
     "recall": recall,
+    "search_memory": search_memory,
     "forget": forget,
     "get_exchange_rate": get_exchange_rate,
 }

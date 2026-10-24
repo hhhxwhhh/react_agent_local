@@ -10,7 +10,7 @@
   <link rel="icon" href="/static/favicon.ico" sizes="any">
   <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
   <link rel="manifest" href="/static/manifest.webmanifest">
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/style.css?v=20261024c">
 </head>
 <body>
   <div class="app">
@@ -64,6 +64,16 @@
       </section>
 
       <form class="composer" id="composer">
+        <div class="permission-card" id="location-permission" hidden>
+          <div class="permission-copy">
+            <strong>位置权限请求</strong>
+            <span>Agent 想调用 <code>get_location</code> 获取你的设备位置。坐标只用于本次请求，不会保存。</span>
+          </div>
+          <div class="permission-actions">
+            <button type="button" class="permission-allow" id="location-allow">允许一次</button>
+            <button type="button" class="permission-deny" id="location-deny">拒绝</button>
+          </div>
+        </div>
         <div class="composer-box">
           <textarea id="input" rows="1" placeholder="输入问题… Enter 发送，Shift+Enter 换行"></textarea>
           <button type="submit" class="send-btn" id="send" aria-label="发送">
@@ -71,7 +81,9 @@
             <span class="send-label">发送</span>
           </button>
         </div>
-        <div class="composer-hint">工具在本机执行 · 外部信息请自行甄别</div>
+        <div class="composer-hint">
+          <span>工具在本机执行 · 外部信息请自行甄别 · 定位需在工具调用时授权</span>
+        </div>
       </form>
     </main>
 
@@ -106,6 +118,6 @@
   </aside>
 
   <div class="toast" id="toast"></div>
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=20261024c"></script>
 </body>
 </html>

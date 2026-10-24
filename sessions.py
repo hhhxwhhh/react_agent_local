@@ -11,6 +11,7 @@ from typing import Callable
 
 from config import BASE_DIR
 from storage import atomic_write_json, lock_for
+from vector_memory import get_store
 
 SESSION_ID_RE = re.compile(r"^[a-f0-9]{32}$")
 DEFAULT_TITLE = "新对话"
@@ -160,6 +161,14 @@ class SessionStore:
             if not path.exists():
                 return False
             path.unlink()
+            # 会话删除后清掉它的向量索引命名空间；失败不影响删除本身，
+            # 残留向量在下次检索时也会因为没有实时记忆而被忽略。
+            try:
+                get_store(self.root.parent / "vector_memory.db").remove_namespace(
+                    "session", session_id
+                )
+            except Exception:
+                pass
             return True
 
     def rename(self, session_id: str, title: str) -> dict:

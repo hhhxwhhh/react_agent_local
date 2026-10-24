@@ -812,11 +812,93 @@ a { color: var(--accent-dark); text-underline-offset: 3px; }
 .send-icon { font-size: 13px; line-height: 1; }
 
 .composer-hint {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 7px 14px;
   margin-top: 7px;
   font-family: var(--mono);
   font-size: 9px;
   letter-spacing: 0.05em;
   color: var(--faint);
+}
+
+.composer-hint > span { min-width: 0; }
+
+/* 工具调用时的授权卡片，出现在输入框上方 */
+.permission-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 9px;
+  padding: 10px 13px;
+  border: 1px solid var(--accent);
+  border-left-width: 3px;
+  border-radius: 2px;
+  background: var(--paper-2);
+}
+.permission-card[hidden] { display: none; }
+.permission-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.permission-copy strong {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent-dark);
+}
+.permission-copy span {
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--ink-soft);
+}
+.permission-copy code {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--accent-dark);
+}
+.permission-actions {
+  display: flex;
+  gap: 8px;
+  flex: none;
+}
+.permission-allow,
+.permission-deny {
+  padding: 5px 12px;
+  border-radius: 2px;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  transition: background 0.14s ease, color 0.14s ease, border-color 0.14s ease;
+}
+.permission-allow {
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--paper);
+}
+.permission-allow:hover { background: var(--accent-dark); border-color: var(--accent-dark); }
+.permission-deny {
+  border: 1px solid var(--line-strong);
+  background: transparent;
+  color: var(--ink-soft);
+}
+.permission-deny:hover { border-color: var(--muted); color: var(--ink); }
+.permission-allow:disabled,
+.permission-deny:disabled { opacity: 0.5; cursor: wait; }
+
+@media (max-width: 620px) {
+  .permission-card {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 9px;
+  }
 }
 
 /* ---------------------------------------------------------------- 记忆抽屉 */

@@ -312,10 +312,14 @@ def _extractive_summary(text: str, max_chars: int) -> str:
     return _truncate_middle("\n".join(key_lines or lines), max_chars)
 
 
-def global_memory_context() -> str:
+def global_memory_context(question: str = "") -> str:
     """CLI 模式：只注入全局记忆（会话记忆由 Web 端管理）。"""
     try:
-        return format_memory_context(JsonMemory(GLOBAL_MEMORY_FILE).load(), {})
+        return format_memory_context(
+            JsonMemory(GLOBAL_MEMORY_FILE).load(),
+            {},
+            query=question,
+        )
     except Exception:
         return ""
 
@@ -1030,6 +1034,15 @@ def _check_tools() -> int:
         ("get_exchange_rate", {"base": "CNY", "target": "USD", "amount": 100}),
         ("get_weather", {"city": "北京"}),
         ("get_air_quality", {"city": "北京"}),
+        ("get_location", {}),
+        (
+            "geo_lookup",
+            {
+                "operation": "distance",
+                "origin": "30.2741,120.1551",
+                "destination": "39.9042,116.4074",
+            },
+        ),
         ("web_search", {"query": "ReAct 论文", "count": 3}),
         ("fetch_url", {"url": "https://arxiv.org/abs/2210.03629", "max_chars": 500}),
         (
@@ -1041,6 +1054,7 @@ def _check_tools() -> int:
         ("list_files", {"path": "demo"}),
         ("remember", {"key": "_self_check", "value": "工具检查通过"}),
         ("recall", {"key": "_self_check"}),
+        ("search_memory", {"query": "工具检查"}),
         ("forget", {"key": "_self_check"}),
     ]
     failures = 0
@@ -1164,7 +1178,7 @@ def _repl(agent: ReActAgent) -> int:
             answer = agent.run(
                 question,
                 history=history[:-1],
-                memory_context=global_memory_context(),
+                memory_context=global_memory_context(question),
                 history_summary=history_summary,
                 history_summary_count=history_summary_count,
             )
@@ -1217,7 +1231,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.question:
         question = " ".join(args.question).strip()
         try:
-            agent.run(question, memory_context=global_memory_context())
+            agent.run(question, memory_context=global_memory_context(question))
         except LLMError as exc:
             print(_red(f"\n[LLM 错误] {exc}"))
             return 1

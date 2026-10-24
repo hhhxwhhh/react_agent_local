@@ -9,6 +9,7 @@ import json
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -481,6 +482,186 @@ class TestServerApi(TempStoreCase):
         self.assertEqual(session["history_summary_count"], 4)
         assistant = session["messages"][-1]
         self.assertEqual(assistant["compactions"], 1)
+
+    def test_chat_passes_location_to_tool_context(self):
+        created = self.client.post("/api/sessions").json()
+        seen: list = []
+
+        class FakeAgent:
+            def __init__(self, *args, **kwargs):
+                seen.append(kwargs.get("tool_context"))
+                self.last_trace = []
+                self.last_forced = False
+                self.last_usage = None
+                self.last_llm_calls = 1
+                self.last_citations = []
+                self.last_compactions = 0
+                self.last_history_summary = ""
+                self.last_history_summary_count = 0
+
+            def run(self, question, **kwargs):
+                return "定位完成。"
+
+        with patch.object(server, "ReActAgent", FakeAgent), patch.object(
+            server, "DeepSeekLLM", lambda *a, **kw: object()
+        ):
+            response = self.client.post(
+                "/api/chat",
+                json={
+                    "session_id": created["id"],
+                    "message": "我在哪？",
+                    "location": {
+                        "latitude": 30.2741,
+                        "longitude": 120.1551,
+                        "accuracy": 15,
+                    },
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            seen[0].user_location,
+            {"latitude": 30.2741, "longitude": 120.1551, "accuracy": 15},
+        )
+        # Web 会话必须注入授权回调，工具调用时才能阻塞等待用户点击。
+        self.assertTrue(callable(seen[0].request_user_location))
+        # 坐标只在请求生命周期内有效，不写入会话文件。
+        session = self.store.get(created["id"])
+        self.assertNotIn("location", session)
+        self.assertNotIn("30.2741", str(session))
+
+    def test_chat_rejects_invalid_location(self):
+        created = self.client.post("/api/sessions").json()
+        response = self.client.post(
+            "/api/chat",
+            json={
+                "session_id": created["id"],
+                "message": "你好",
+                "location": {"latitude": 100, "longitude": 120},
+            },
+        )
+        self.assertEqual(response.status_code, 422)
+
+    def test_location_permission_allow_flow(self):
+        created = self.client.post("/api/sessions").json()
+        broker = server.LocationPermissionBroker(timeout=3)
+        events: list[dict] = []
+        captured: dict = {}
+
+        def worker() -> None:
+            captured["coords"] = broker.request(created["id"], events.append)
+
+        thread = threading.Thread(target=worker)
+        with patch.object(server, "location_broker", broker):
+            thread.start()
+            deadline = time.time() + 2
+            while not events and time.time() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(events, "worker 应发出 location_request")
+            request = events[0]
+            self.assertEqual(request["type"], "location_request")
+            self.assertEqual(request["session_id"], created["id"])
+
+            response = self.client.post(
+                "/api/location-permission",
+                json={
+                    "token": request["token"],
+                    "session_id": created["id"],
+                    "allowed": True,
+                    "latitude": 30.2741,
+                    "longitude": 120.1551,
+                    "accuracy": 15,
+                },
+            )
+            thread.join(2)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["decision"], "allowed")
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(
+            captured["coords"],
+            {"latitude": 30.2741, "longitude": 120.1551, "accuracy": 15},
+        )
+
+    def test_location_permission_deny_flow(self):
+        created = self.client.post("/api/sessions").json()
+        broker = server.LocationPermissionBroker(timeout=3)
+        events: list[dict] = []
+        captured: dict = {}
+
+        def worker() -> None:
+            captured["coords"] = broker.request(created["id"], events.append)
+
+        thread = threading.Thread(target=worker)
+        with patch.object(server, "location_broker", broker):
+            thread.start()
+            deadline = time.time() + 2
+            while not events and time.time() < deadline:
+                time.sleep(0.01)
+            response = self.client.post(
+                "/api/location-permission",
+                json={
+                    "token": events[0]["token"],
+                    "session_id": created["id"],
+                    "allowed": False,
+                },
+            )
+            thread.join(2)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["decision"], "denied")
+        self.assertFalse(thread.is_alive())
+        self.assertIsNone(captured["coords"])
+
+    def test_location_permission_rejects_expired_token(self):
+        response = self.client.post(
+            "/api/location-permission",
+            json={
+                "token": "x" * 20,
+                "session_id": "y" * 32,
+                "allowed": True,
+                "latitude": 30,
+                "longitude": 120,
+            },
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_location_permission_requires_coordinates(self):
+        created = self.client.post("/api/sessions").json()
+        broker = server.LocationPermissionBroker(timeout=3)
+        events: list[dict] = []
+        captured: dict = {}
+
+        def worker() -> None:
+            captured["coords"] = broker.request(created["id"], events.append)
+
+        thread = threading.Thread(target=worker)
+        with patch.object(server, "location_broker", broker):
+            thread.start()
+            deadline = time.time() + 2
+            while not events and time.time() < deadline:
+                time.sleep(0.01)
+            response = self.client.post(
+                "/api/location-permission",
+                json={
+                    "token": events[0]["token"],
+                    "session_id": created["id"],
+                    "allowed": True,
+                },
+            )
+            # 释放 worker，避免测试等待授权超时
+            self.client.post(
+                "/api/location-permission",
+                json={
+                    "token": events[0]["token"],
+                    "session_id": created["id"],
+                    "allowed": False,
+                },
+            )
+            thread.join(2)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIsNone(captured["coords"])
 
     def test_chat_rejects_unknown_session(self):
         response = self.client.post(

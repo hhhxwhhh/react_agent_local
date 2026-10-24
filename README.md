@@ -14,7 +14,8 @@
 - 模型：DeepSeek `deepseek-chat`（OpenAI 兼容接口）
 - 依赖：`requests` + `tzdata`（Windows 的时区数据库）+ `fastapi` / `uvicorn`（Web 客户端）
 - 两种使用方式：命令行（CLI）与本地 Web 聊天界面
-- 记忆分两层：**会话记忆**（每个对话独立）与**全局记忆**（跨对话共享）
+- 记忆分两层：**会话记忆**（每个对话独立）与**全局记忆**（跨对话共享），
+  并带本地向量索引：`search_memory` 可按相似度找回记忆，注入提示词前也会按问题相关性重排
 - 循环自带重复调用拦截、格式错误收口、取消检查和 token 用量统计
 
 > 原理拆解、ReAct 论文精读、评测设计、已知问题与组会 Q&A：[AGENT_DEEP_DIVE.md](AGENT_DEEP_DIVE.md)
@@ -32,7 +33,10 @@
 | 知识问答 / 联网搜索 | 必应中文搜索 RSS | 不需要 |
 | 网页正文读取 | 直接 HTTP 抓取 | 不需要 |
 | 实时汇率 | open.er-api.com 公开 API | 不需要 |
+| 精确定位 | 浏览器 Geolocation API（用户授权）+ OpenStreetMap Nominatim 反向地理编码 | 不需要 |
+| 大致位置 | ipwho.is / ipapi.co 公网 IP 定位（未授权 GPS 时的回退） | 不需要 |
 | 计算、日期、单位、文件、记忆 | 本地实现 | 不需要 |
+| 向量记忆索引 | SQLite + 本地特征哈希 | 不需要 |
 
 DeepSeek Key 申请：<https://platform.deepseek.com/api_keys>
 
@@ -73,6 +77,17 @@ HISTORY_COMPACT_CHARS=9000
 HISTORY_COMPACT_MESSAGES=12
 HISTORY_KEEP_MESSAGES=8
 HISTORY_SUMMARY_BATCH_MESSAGES=4
+
+# 向量记忆（默认开启；设为 false 可做纯关键词消融）
+VECTOR_MEMORY_ENABLED=true
+VECTOR_DIM=512
+VECTOR_SEARCH_LIMIT=5
+VECTOR_MIN_SCORE=0.05
+VECTOR_HYBRID_ALPHA=0.7
+SEMANTIC_RERANK_MIN_ENTRIES=6
+
+# 工具触发定位时，等待用户点击授权的秒数
+LOCATION_PERMISSION_TIMEOUT=90
 ```
 
 也可以不用 `.env`，直接设置环境变量：
@@ -119,6 +134,8 @@ python server.py --port 8080 --no-browser
 - 消息区：用户/助手气泡，**实时展示 Thought → Action → Observation 推理轨迹**；
 - 每个会话独立保存消息与**会话记忆**，切换会话不会串味；
 - 右下角“记忆管理”抽屉：查看/删除本会话记忆与全局记忆，过期条目会标记；
+- 定位按需授权：模型调用 `get_location` 时，输入框上方弹出权限卡片；
+  允许后使用浏览器 GPS，拒绝或超时则回退到公网 IP 的城市级估算；
 - 回答支持 Markdown（代码块、列表、粗体、链接）；
 - 上下文过长时自动压缩：单轮轨迹保留最近步骤原文，较早步骤变成摘要；
   跨轮历史把较早对话增量摘要后写入会话文件，而不是简单丢弃；
@@ -238,6 +255,8 @@ Question ───────>│  DeepSeek（system + scratchpad）│
 | `fetch_url` | `url`, `max_chars` | 抓取网页并提取正文，带内网地址拦截 |
 | `calculate` | `expression` | AST 安全求值，支持 `+ - * / // % **`、`sqrt`、`log`、`sin` 等 |
 | `get_current_time` | `location` | 城市/IANA 时区的当前时间、星期和 UTC 偏移，支持中英文城市名 |
+| `get_location` | `ip` | 调用时由界面弹出位置授权；允许后返回设备 GPS（含精度、反向地理编码）；拒绝/超时回退公网 IP 城市级估算。显式传 `ip` 时直接按该 IP 查询 |
+| `geo_lookup` | `operation`, `latitude`, `longitude`, `query`, `origin`, `destination`, `limit` | 坐标与地名互转：`reverse` 坐标→地址，`forward` 地名→坐标候选，`distance` 本地算直线距离/方位角/中点。不需要额外 Key |
 | `date_calc` | `operation`, `start_date`, `end_date`, `days` | 日期差、日期加减、星期/ISO 周/年内天数/闰年 |
 | `convert_units` | `value`, `from_unit`, `to_unit` | 长度、质量、温度、面积、体积、速度换算，支持“公里/英里”“摄氏度/华氏度”等中英文写法 |
 | `list_files` | `path`, `recursive` | 列出 workspace 沙箱内的文件和目录 |
@@ -246,6 +265,7 @@ Question ───────>│  DeepSeek（system + scratchpad）│
 | `search_files` | `keyword`, `path`, `search_content`, `max_results` | 按路径/文件名或文件内容搜索 workspace |
 | `remember` | `key`, `value`, `scope`, `ttl_days` | 保存记忆。`scope=session` 只属于当前对话；`scope=global` 跨对话共享；`ttl_days` 可设置有效期 |
 | `recall` | `key`, `scope` | 读取记忆；省略 key 时列出全部 |
+| `search_memory` | `query`, `scope`, `limit` | 语义/关键词混合检索记忆；`scope=all` 同时查会话与全局 |
 | `forget` | `key`, `scope` | 删除一条记忆；只在用户明确要求“忘记/删除”时调用 |
 | `get_exchange_rate` | `base`, `target`, `amount` | 实时汇率查询与金额换算（open.er-api.com，无需 Key） |
 
@@ -265,6 +285,70 @@ Question ───────>│  DeepSeek（system + scratchpad）│
 - 单文件读取上限 1 MB、写入上限 200000 字符；
 - Agent 被要求在覆盖文件前先用 `read_file` 查看原内容。
 
+### GPS 定位（工具调用时授权）
+
+定位不是提前授权，而是**由工具调用触发**，类似 Claude Code 的权限确认：
+
+1. 模型决定调用 `get_location`；
+2. 服务端通过 SSE 发出 `location_request`（带一次性 token），工具线程阻塞等待；
+3. 输入框上方出现授权卡片：「Agent 想调用 get_location 获取你的设备位置」，
+   可选 **允许一次** / **拒绝**；
+4. 点击允许后，浏览器弹出系统定位权限；前端用
+   `navigator.geolocation.getCurrentPosition()` 取到经纬度与精度，POST 回
+   `/api/location-permission`；
+5. 服务端唤醒工具线程，返回 GPS 结果；拒绝或超时则回退到公网 IP。
+
+```
+SSE:  {"type": "location_request", "token": "...", "session_id": "...", "timeout": 90}
+POST: /api/location-permission
+      {"token": "...", "session_id": "...", "allowed": true,
+       "latitude": 30.2741, "longitude": 120.1551, "accuracy": 15}
+```
+
+`get_location` 的优先级：
+
+1. 显式传入 `ip` → 按 IP 查询（便于问“某个 IP 在哪”，不会触发授权）；
+2. 本次请求已带 `location`（API 调用方可直接提供）→ 使用该坐标；
+3. Web 会话 → 触发上面的授权流程；
+4. 拒绝、超时或 CLI 模式 → 当前出口 IP 的城市级估算，并明确标注“不是 GPS”。
+
+隐私与安全边界：
+
+- token 与 `session_id` 绑定，一次性使用；结束（允许/拒绝/超时/取消）即失效；
+- 坐标只在当次 HTTP 请求 → `ToolContext` → 工具调用链中传递，**不写入会话文件、
+  不写入长期记忆、不写日志**，也不保存在前端 state 里；
+- 反向地理编码会把坐标发给 `api.bigdatacloud.net`（首选）或
+  `nominatim.openstreetmap.org`（回退），这是唯一的外部传输；
+- 浏览器只在安全上下文（HTTPS 或 `http://127.0.0.1`）提供定位。本项目默认绑定
+  `127.0.0.1`，所以本地可用；若改用局域网 IP 访问，浏览器会拒绝定位；
+- 等待时长由 `LOCATION_PERMISSION_TIMEOUT`（默认 90 秒）控制；用户点“停止”会
+  立即解除等待；
+- 提示词要求模型区分来源：只有标注“设备 GPS/浏览器定位（用户已授权）”时才能
+  说精确定位，公网 IP 结果必须说明是城市级估算、可能被代理/VPN 改变；除非用户
+  明确要求，不得把坐标写进记忆。
+
+### 地理查询（`geo_lookup`）
+
+`get_location` 只回答“我在哪”；需要在坐标与地名之间换算、计算两点关系时用
+`geo_lookup`，两者的授权行为是分开的：
+
+| `operation` | 需要的参数 | 返回 |
+|---|---|---|
+| `reverse` | `latitude`, `longitude` | 详细地址、时区、坐标、数据来源 |
+| `forward` | `query`, 可选 `limit` | 最多 N 个候选地点（名称、坐标、行政区、类型） |
+| `distance` | `origin`, `destination`（`"纬度,经度"`） | 球面直线距离、方位角、中点坐标 |
+
+- **完全本地**：`distance` 用 Haversine 公式计算，不发网络请求；
+- **无需新 Key**：`reverse` 首选 BigDataCloud（本机网络下可达），失败回退
+  OpenStreetMap Nominatim；`forward` 首选 Open-Meteo Geocoding，失败回退
+  Nominatim；
+- **中文地名**：`forward` 会尝试去掉行政后缀、截取中文词片等查询变体，因为
+  Open-Meteo 对“杭州西湖”这类复合名称可能返回空。仍然找不到时会提示拆开地名；
+- **缓存**：同一坐标/地名在进程内用 `lru_cache` 缓存，避免重复请求；这两个
+  服务都是公共实例，不要高频批量调用；
+- **不触发定位授权**：用户自己给出坐标或地名时，提示词要求模型用
+  `geo_lookup`，不要调用 `get_location`。
+
 ### 分层记忆机制
 
 | 层级 | 存放位置 | 生命周期 | 用途 |
@@ -273,6 +357,7 @@ Question ───────>│  DeepSeek（system + scratchpad）│
 | 会话历史摘要 | `data/sessions/<id>.json` 的 `history_summary` | 与对话同生共死 | 较早对话的增量摘要，避免每次重发全部历史 |
 | 会话记忆 | `data/sessions/<id>.json` 的 `memory` | 与对话同生共死 | 本对话的约定、上下文、临时结论 |
 | 全局记忆 | `data/memory.json` | 跨会话持久，可设 TTL | 用户长期偏好，如“我常住杭州” |
+| 向量索引 | `data/vector_memory.db` | 派生缓存，可随时重建 | 语义检索、提示词注入前的相关性重排 |
 
 工作方式：
 
@@ -291,7 +376,19 @@ Question ───────>│  DeepSeek（system + scratchpad）│
 9. **单轮压缩**：ReAct scratchpad 超过阈值后，较早步骤由模型摘要成
    “目标 / 已完成动作 / 关键事实与 URL / 错误与未决问题”，最近步骤保留原文；
 10. **跨轮压缩**：历史超过阈值后，只把最近 8 条对话保留原文，更早内容增量合并进
-    `history_summary`。摘要失败会退回抽取式压缩，不会因为压缩失败而中断回答。
+    `history_summary`。摘要失败会退回抽取式压缩，不会因为压缩失败而中断回答；
+11. **向量检索**：每条记忆额外写入 SQLite 向量索引。查询时用“余弦相似度 + 字面重合”
+    的混合分数排序，`search_memory` 可以按自然语言找回记忆，不再依赖精确 key；
+12. **相关性重排**：记忆条目达到 6 条后，注入提示词前先按与当前问题的相关性排序，
+    同样预算下优先放入更可能用得上的记忆；
+13. **索引只是缓存**：事实来源仍是 `memory.json` / 会话 JSON。检索命中后还会回到
+    实时记忆校验，删除、TTL 过期或手工修改不会被旧向量“复活”；索引损坏时自动
+    退化为关键词检索，不会影响记忆读写。
+
+> 向量实现说明：DeepSeek 没有公开 embedding 接口，本项目不引入第二个 Key 或
+> torch 依赖，而是用**本地特征哈希**把中英文 token 映射到 512 维向量。它擅长
+> 字面/局部字符相似，不等于神经语义 embedding，不能可靠处理同义改写；这是
+> 一个有意的工程折中，也方便做“关键词 vs 向量混合”的消融实验。
 
 > 升级说明：如果检测到旧版 `workspace/memory.json`，首次读取时会迁移到
 > `data/memory.json`，旧文件归档为 `data/memory.legacy.json`；迁移不会删除记忆内容。
@@ -356,19 +453,20 @@ Question ───────>│  DeepSeek（system + scratchpad）│
 ```
 react_agent/
 ├── agent.py            # CLI + ReAct 循环 + 上下文压缩 + 历史/事件
-├── server.py           # FastAPI 服务：会话 API + SSE 流式对话
+├── server.py           # FastAPI 服务：会话/记忆 API、SSE、位置授权 broker
 ├── sessions.py         # 会话持久化（消息、标题、历史摘要、会话记忆）
-├── memory.py           # 全局/会话记忆、TTL、容量与提示词压缩
+├── memory.py           # 全局/会话记忆、TTL、容量、语义检索与提示词压缩
+├── vector_memory.py    # SQLite 向量索引：特征哈希、混合检索、相关性重排
 ├── storage.py          # 共享路径锁 + JSON 原子写入
-├── tool_context.py     # 工具运行上下文（当前会话、默认记忆范围）
+├── tool_context.py     # 工具运行上下文（会话、记忆范围、GPS 坐标与授权回调）
 ├── llm.py              # DeepSeek Chat Completions 客户端（含重试）
 ├── prompts.py          # ReAct 系统提示词（含记忆规则）
-├── tools.py            # 十六个工具 + 工具注册表
+├── tools.py            # 十九个工具 + 工具注册表
 ├── config.py           # .env / 环境变量加载
 ├── web/
 │   ├── index.html      # 聊天界面
 │   └── static/
-│       ├── app.js      # SSE、会话、记忆面板、Markdown
+│       ├── app.js      # SSE、会话、记忆面板、Markdown、按需位置授权
 │       ├── style.css   # 纸张编辑风 UI
 │       ├── icon.svg    # 项目图标（矢量）
 │       ├── icon-192.png / icon-512.png
@@ -377,12 +475,14 @@ react_agent/
 │       └── manifest.webmanifest
 ├── workspace/          # Agent 的文件沙箱（自动创建）
 ├── data/
-│   ├── sessions/       # 会话文件（自动创建，已 gitignore）
-│   └── memory.json     # 全局记忆（自动创建，已 gitignore）
+│   ├── sessions/         # 会话文件（自动创建，已 gitignore）
+│   ├── memory.json       # 全局记忆（自动创建，已 gitignore）
+│   └── vector_memory.db  # 向量索引（自动创建，可删除重建，已 gitignore）
 ├── tests/
-│   ├── test_agent.py   # 解析、工具、ReAct 循环
-│   ├── test_memory.py  # 并发、TTL、容量、上下文预算、迁移
-│   └── test_sessions.py# 会话、分层记忆、Web API
+│   ├── test_agent.py        # 解析、工具、ReAct 循环
+│   ├── test_memory.py       # 并发、TTL、容量、上下文预算、迁移
+│   ├── test_sessions.py     # 会话、分层记忆、Web API
+│   └── test_vector_memory.py# 向量检索、关键词兜底、位置与地理查询工具
 ├── AGENT_DEEP_DIVE.md  # 原理、评测与组会答辩手册
 ├── 2210.03629v3.pdf    # ReAct 原论文（ICLR 2023）
 ├── requirements.txt
@@ -394,7 +494,7 @@ react_agent/
 
 ## 7. 测试
 
-离线测试（共 91 个用例，不需要 Key、不需要网络；符号链接用例在无权限的
+离线测试（共 125 个用例，不需要 Key、不需要网络；符号链接用例在无权限的
 Windows 环境会自动跳过）：
 
 ```bash
@@ -405,7 +505,12 @@ python -m unittest discover -s tests -v
 token 用量累计、工具安全、文件沙箱与符号链接逃逸、SSRF 重定向拦截、
 AQI 分级、会话 CRUD、会话/全局记忆隔离、记忆并发写、TTL 与过期清理、
 容量上限、上下文预算、单轮/跨轮上下文压缩与摘要失败回退、旧记忆迁移、
-历史与记忆注入、SSE 流式接口、会话落盘。
+向量索引的增量同步与作用域隔离、语义检索与关键词兜底、位置工具（含私网 IP
+拒绝与供应商回退）、浏览器 GPS 坐标格式化、反向地理编码失败降级、
+工具触发的位置授权（token 等待/唤醒、允许/拒绝、一次性失效、缺坐标校验）、
+`geo_lookup` 的坐标校验、Haversine 距离/方位角/中点、反向地理编码供应商回退、
+正向地理编码候选与回退、`/api/chat` 坐标传递与不落盘、非法坐标 422 校验、历史与记忆注入、
+SSE 流式接口、会话落盘。
 
 工具联网检查：
 
@@ -477,3 +582,8 @@ python agent.py --check-tools
 - 文件搜索会跳过指向 workspace 外部的符号链接。
 - 外部网页和搜索结果会用边界标记包裹，提示模型只当数据、不当指令。
 - API Key 只从环境变量或 `.env` 读取，不会打印到日志。
+- 定位权限由工具调用触发，用户必须在授权卡片上点击「允许一次」；token 一次性、
+  与会话绑定。坐标只随当次工具调用传递，不写会话、不写记忆、不写日志。反向
+  地理编码会把坐标发给 OpenStreetMap Nominatim，除此之外不会外传。
+- 浏览器只在安全上下文提供定位（HTTPS 或 `127.0.0.1`），因此不要把本地服务
+  暴露到局域网或公网。

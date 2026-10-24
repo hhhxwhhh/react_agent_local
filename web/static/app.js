@@ -21,6 +21,9 @@ const els = {
   globalMemoryCount: $("global-memory-count"),
   modelInfo: $("model-info"),
   toast: $("toast"),
+  locationPermission: $("location-permission"),
+  locationAllow: $("location-allow"),
+  locationDeny: $("location-deny"),
 };
 
 const state = {
@@ -30,6 +33,9 @@ const state = {
   controller: null,
   current: null,
   memory: { global: {}, session: {} },
+  // 等待用户回应的位置授权请求：{ token, sessionId }。
+  // 坐标不会保存在这里：用户点击允许后立即回传服务端，页面不留存。
+  pendingLocation: null,
 };
 
 /* ---------------------------------------------------------------- 基础工具 */
@@ -758,7 +764,22 @@ function handleStreamEvent(event) {
       step.wrap.appendChild(note);
       break;
     }
+    case "location_request": {
+      showLocationPermission(event);
+      break;
+    }
+    case "location_request_closed": {
+      if (state.pendingLocation && state.pendingLocation.token === event.token) {
+        clearLocationPrompt();
+        if (event.reason === "timeout") {
+          showToast("位置授权超时，已回退到 IP 估算", true);
+        }
+        setStatus("thinking", "已跳过位置授权");
+      }
+      break;
+    }
     case "final": {
+      clearLocationPrompt();
       refs.bubble.innerHTML = renderMarkdown(event.answer || "");
       if (!refs.steps.size) refs.trace.remove();
       refs.msg
@@ -777,6 +798,7 @@ function handleStreamEvent(event) {
       break;
     }
     case "cancelled": {
+      clearLocationPrompt();
       refs.bubble.replaceChildren();
       const note = document.createElement("p");
       note.textContent = "已取消本轮推理，回答未保存。";
@@ -795,6 +817,7 @@ function handleStreamEvent(event) {
       break;
     }
     case "error": {
+      clearLocationPrompt();
       refs.bubble.innerHTML = "";
       const error = document.createElement("p");
       error.textContent = `出错了：${event.message}`;
@@ -840,6 +863,85 @@ async function consumeSSE(response, onEvent) {
   }
 }
 
+function showLocationPermission(event) {
+  state.pendingLocation = {
+    token: event.token,
+    sessionId: event.session_id,
+  };
+  if (!els.locationPermission) return;
+  els.locationPermission.hidden = false;
+  els.locationAllow.disabled = false;
+  els.locationDeny.disabled = false;
+  els.locationAllow.textContent = "允许一次";
+  setStatus("thinking", "等待位置授权…");
+  showToast("Agent 请求使用你的位置，请选择是否允许");
+}
+
+function clearLocationPrompt() {
+  state.pendingLocation = null;
+  if (!els.locationPermission) return;
+  els.locationPermission.hidden = true;
+  els.locationAllow.disabled = false;
+  els.locationDeny.disabled = false;
+  els.locationAllow.textContent = "允许一次";
+}
+
+async function resolveLocationRequest(allowed, coords = null) {
+  const pending = state.pendingLocation;
+  clearLocationPrompt();
+  if (!pending) return;
+  try {
+    await api("/api/location-permission", {
+      method: "POST",
+      body: JSON.stringify({
+        token: pending.token,
+        session_id: pending.sessionId,
+        allowed,
+        ...(coords || {}),
+      }),
+    });
+  } catch (error) {
+    showToast(`位置授权回传失败：${error.message}`, true);
+  }
+}
+
+function allowLocation() {
+  if (!state.pendingLocation) return;
+  if (!navigator.geolocation) {
+    showToast("当前浏览器不支持定位，已回退到 IP 估算", true);
+    resolveLocationRequest(false);
+    return;
+  }
+  els.locationAllow.disabled = true;
+  els.locationDeny.disabled = true;
+  els.locationAllow.textContent = "定位中…";
+  navigator.geolocation.getCurrentPosition(
+    (position) => {
+      const { latitude, longitude, accuracy } = position.coords;
+      // 与服务端 BrowserLocation 的上限保持一致，避免异常精度导致 422。
+      const meters = Number.isFinite(accuracy)
+        ? Math.min(100000, Math.max(0, Math.round(accuracy)))
+        : null;
+      resolveLocationRequest(true, {
+        latitude,
+        longitude,
+        accuracy: meters,
+      });
+      showToast("已授权本次位置");
+    },
+    (error) => {
+      const reasons = {
+        1: "定位权限被拒绝",
+        2: "暂时无法获取位置",
+        3: "定位超时",
+      };
+      showToast(`${reasons[error.code] || "定位失败"}，已回退到 IP 估算`, true);
+      resolveLocationRequest(false);
+    },
+    { enableHighAccuracy: true, timeout: 12000, maximumAge: 0 }
+  );
+}
+
 async function sendMessage(text) {
   if (!state.sessionId) {
     await createSession();
@@ -847,6 +949,7 @@ async function sendMessage(text) {
   }
 
   state.current = null;
+  clearLocationPrompt();
   appendUserMessage(text);
   const refs = startStreamingMessage();
   state.current = refs;
@@ -858,7 +961,10 @@ async function sendMessage(text) {
     const response = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session_id: state.sessionId, message: text }),
+      body: JSON.stringify({
+        session_id: state.sessionId,
+        message: text,
+      }),
       signal: state.controller.signal,
     });
 
@@ -908,6 +1014,10 @@ async function sendMessage(text) {
 }
 
 function stopStreaming() {
+  // 先在授权卡上选择“拒绝”，让工具线程立即解除等待；取消请求随后生效。
+  if (state.pendingLocation) {
+    resolveLocationRequest(false);
+  }
   if (state.sessionId) {
     // 通知服务端在下一个检查点停止；单独的请求，不受当前 AbortController 影响。
     fetch(`/api/sessions/${encodeURIComponent(state.sessionId)}/cancel`, {
@@ -1089,6 +1199,12 @@ function bindEvents() {
     resizeInput();
     sendMessage(text);
   });
+
+  // 兼容旧缓存页面：缺少授权卡片时不应让整个初始化失败。
+  if (els.locationAllow && els.locationDeny) {
+    els.locationAllow.addEventListener("click", allowLocation);
+    els.locationDeny.addEventListener("click", () => resolveLocationRequest(false));
+  }
 
   els.input.addEventListener("input", resizeInput);
   els.input.addEventListener("keydown", (event) => {

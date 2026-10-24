@@ -12,7 +12,9 @@ from __future__ import annotations
 import argparse
 import json
 import queue
+import secrets
 import threading
+import time
 import webbrowser
 from typing import Iterator
 
@@ -26,6 +28,7 @@ from config import (
     BASE_DIR,
     DEEPSEEK_API_KEY,
     DEEPSEEK_MODEL,
+    LOCATION_PERMISSION_TIMEOUT,
     MAX_CONCURRENT_RUNS,
     MAX_STEPS,
 )
@@ -50,13 +53,134 @@ _run_slots = threading.BoundedSemaphore(max(1, MAX_CONCURRENT_RUNS))
 
 
 # ---------------------------------------------------------------------------
+# 位置授权：工具执行时阻塞等待前端点击“允许”
+# ---------------------------------------------------------------------------
+
+
+class LocationPermissionBroker:
+    """把“工具需要 GPS”变成一次可响应的授权请求。
+
+    worker 线程调用 request()，通过 SSE 发出一次性 token 并阻塞等待；
+    前端在用户点击后 POST 回 token 和坐标，resolve() 唤醒 worker。
+    token 与 session 绑定，过期或会话不匹配都会被拒绝。
+    """
+
+    def __init__(self, timeout: float = LOCATION_PERMISSION_TIMEOUT) -> None:
+        self.timeout = max(1.0, float(timeout))
+        self._pending: dict[str, dict] = {}
+        self._lock = threading.Lock()
+
+    def request(
+        self,
+        session_id: str,
+        emit,
+        cancel_event: threading.Event | None = None,
+    ) -> dict | None:
+        token = secrets.token_urlsafe(18)
+        pending = {
+            "session_id": session_id,
+            "event": threading.Event(),
+            "decided": False,
+            "allowed": False,
+            "coords": None,
+        }
+        with self._lock:
+            self._pending[token] = pending
+
+        emit(
+            {
+                "type": "location_request",
+                "session_id": session_id,
+                "token": token,
+                "timeout": int(self.timeout),
+            }
+        )
+
+        deadline = time.monotonic() + self.timeout
+        try:
+            while time.monotonic() < deadline:
+                if pending["event"].wait(0.2):
+                    break
+                if cancel_event is not None and cancel_event.is_set():
+                    break
+        finally:
+            with self._lock:
+                self._pending.pop(token, None)
+            if pending["decided"]:
+                reason = "allowed" if pending["allowed"] else "denied"
+            elif cancel_event is not None and cancel_event.is_set():
+                reason = "cancelled"
+            else:
+                reason = "timeout"
+            # 无论授权、拒绝、超时还是取消，都通知前端收起授权卡片。
+            emit(
+                {
+                    "type": "location_request_closed",
+                    "token": token,
+                    "reason": reason,
+                }
+            )
+
+        if cancel_event is not None and cancel_event.is_set():
+            return None
+        if pending["allowed"] and pending["coords"]:
+            return pending["coords"]
+        return None
+
+    def resolve(
+        self,
+        token: str,
+        session_id: str,
+        allowed: bool,
+        coords: dict | None = None,
+    ) -> str:
+        with self._lock:
+            pending = self._pending.get(token)
+            if pending is None or pending["session_id"] != session_id:
+                raise KeyError("授权请求不存在或已过期")
+            if pending["decided"]:
+                raise RuntimeError("该授权请求已处理")
+            if allowed and not coords:
+                raise ValueError("允许定位时必须提供坐标")
+            pending["decided"] = True
+            pending["allowed"] = bool(allowed)
+            pending["coords"] = coords if allowed else None
+            pending["event"].set()
+        return "allowed" if allowed else "denied"
+
+
+location_broker = LocationPermissionBroker()
+
+
+# ---------------------------------------------------------------------------
 # 请求模型
 # ---------------------------------------------------------------------------
+
+
+class BrowserLocation(BaseModel):
+    """浏览器 geolocation 返回的坐标；只在本次请求内使用，不写入会话。"""
+
+    latitude: float = Field(ge=-90, le=90)
+    longitude: float = Field(ge=-180, le=180)
+    accuracy: float | None = Field(default=None, ge=0, le=100000)
 
 
 class ChatRequest(BaseModel):
     session_id: str
     message: str = Field(min_length=1, max_length=20000)
+    # 可选：API 调用方已经拿到的坐标；Web UI 不走这里，而是等工具触发授权。
+    location: BrowserLocation | None = None
+
+
+class LocationDecision(BaseModel):
+    """前端对 location_request 的回应。"""
+
+    token: str = Field(min_length=8, max_length=128)
+    session_id: str = Field(min_length=1, max_length=64)
+    allowed: bool
+    latitude: float | None = Field(default=None, ge=-90, le=90)
+    longitude: float | None = Field(default=None, ge=-180, le=180)
+    accuracy: float | None = Field(default=None, ge=0, le=100000)
 
 
 class RenameRequest(BaseModel):
@@ -70,7 +194,11 @@ class RenameRequest(BaseModel):
 
 @app.get("/")
 def index() -> FileResponse:
-    return FileResponse(WEB_DIR / "index.html")
+    # 页面结构随功能更新，禁止浏览器缓存，避免 HTML 与静态资源版本错配。
+    return FileResponse(
+        WEB_DIR / "index.html",
+        headers={"Cache-Control": "no-store, max-age=0"},
+    )
 
 
 @app.get("/favicon.ico", include_in_schema=False)
@@ -137,6 +265,29 @@ def cancel_session(session_id: str) -> dict:
     return {"cancelled": True}
 
 
+@app.post("/api/location-permission")
+def location_permission(body: LocationDecision) -> dict:
+    """前端授权结果：允许时带上浏览器 geolocation 返回的坐标。"""
+    coords = None
+    if body.allowed:
+        if body.latitude is None or body.longitude is None:
+            raise HTTPException(status_code=400, detail="允许定位时必须提供经纬度")
+        coords = {"latitude": body.latitude, "longitude": body.longitude}
+        if body.accuracy is not None:
+            coords["accuracy"] = body.accuracy
+    try:
+        decision = location_broker.resolve(
+            body.token, body.session_id, body.allowed, coords
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc.args[0]))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True, "decision": decision}
+
+
 # ---------------------------------------------------------------------------
 # 记忆
 # ---------------------------------------------------------------------------
@@ -191,6 +342,11 @@ def chat(body: ChatRequest) -> StreamingResponse:
     if not question:
         raise HTTPException(status_code=400, detail="消息不能为空")
 
+    # 坐标只随本次请求传入工具上下文，不落盘、不写日志、不自动写入记忆。
+    user_location = (
+        body.location.model_dump(exclude_none=True) if body.location else None
+    )
+
     session = store.get(body.session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="会话不存在")
@@ -225,7 +381,9 @@ def chat(body: ChatRequest) -> StreamingResponse:
     except Exception:
         global_memory = {}
     memory_context = format_memory_context(
-        global_memory, session.get("memory", {})
+        global_memory,
+        session.get("memory", {}),
+        query=question,
     )
 
     session_id = session["id"]
@@ -234,6 +392,10 @@ def chat(body: ChatRequest) -> StreamingResponse:
     def on_event(event: dict) -> None:
         events.put(event)
 
+    def request_user_location() -> dict | None:
+        # 在工具线程里阻塞，直到前端授权、拒绝、超时或本轮被取消。
+        return location_broker.request(session_id, on_event, cancel_event)
+
     def worker() -> None:
         try:
             llm = DeepSeekLLM()
@@ -241,6 +403,8 @@ def chat(body: ChatRequest) -> StreamingResponse:
                 session_id=session_id,
                 session_store=store,
                 default_scope="session",
+                user_location=user_location,
+                request_user_location=request_user_location,
             )
             agent = ReActAgent(
                 llm=llm,

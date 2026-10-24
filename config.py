@@ -35,6 +35,8 @@ REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "90"))
 DEEPSEEK_MAX_TOKENS = int(os.getenv("DEEPSEEK_MAX_TOKENS", "2048"))
 # Web 服务同时运行的推理任务上限，避免多个会话各自起线程把本机资源占满。
 MAX_CONCURRENT_RUNS = max(1, int(os.getenv("MAX_CONCURRENT_RUNS", "3")))
+# 调用 get_location 时等待用户在界面上授权浏览器定位的时长；超时回退到 IP 定位。
+LOCATION_PERMISSION_TIMEOUT = max(5, int(os.getenv("LOCATION_PERMISSION_TIMEOUT", "90")))
 
 # 单轮 ReAct 上下文压缩：scratchpad 超过阈值后，把较早步骤摘要掉，只保留最近原文。
 CONTEXT_COMPACT_CHARS = max(800, int(os.getenv("CONTEXT_COMPACT_CHARS", "7000")))
@@ -48,3 +50,19 @@ HISTORY_KEEP_MESSAGES = max(2, int(os.getenv("HISTORY_KEEP_MESSAGES", "8")))
 HISTORY_SUMMARY_BATCH_MESSAGES = max(
     1, int(os.getenv("HISTORY_SUMMARY_BATCH_MESSAGES", "4"))
 )
+
+# 向量记忆索引。没有额外 embedding API 时使用本地特征哈希，零依赖、可离线。
+# 可设为 false 做“向量检索 vs 纯关键词”的消融实验。
+VECTOR_MEMORY_ENABLED = os.getenv("VECTOR_MEMORY_ENABLED", "true").strip().lower() not in {
+    "0",
+    "false",
+    "off",
+    "no",
+}
+VECTOR_DIM = max(64, int(os.getenv("VECTOR_DIM", "512")))
+VECTOR_SEARCH_LIMIT = max(1, min(20, int(os.getenv("VECTOR_SEARCH_LIMIT", "5"))))
+VECTOR_MIN_SCORE = min(1.0, max(0.0, float(os.getenv("VECTOR_MIN_SCORE", "0.05"))))
+# 混合检索中余弦相似度的权重；剩余权重给字面重合分数。
+VECTOR_HYBRID_ALPHA = min(1.0, max(0.0, float(os.getenv("VECTOR_HYBRID_ALPHA", "0.7"))))
+# 记忆条目超过这个数量时，注入提示词前按与问题的相关性重排。
+SEMANTIC_RERANK_MIN_ENTRIES = max(2, int(os.getenv("SEMANTIC_RERANK_MIN_ENTRIES", "6")))
