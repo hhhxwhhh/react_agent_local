@@ -944,6 +944,12 @@ _FAILURE_KEYWORDS: dict[str, tuple[str, ...]] = {
         "返回空",
         "不可见",
     ),
+    "fabricated_tool_calls": (
+        "工具调用次数",
+        "真实调用",
+        "调用过工具",
+        "action_count",
+    ),
     "blind_read_loop": ("read_file", "读取", "search_files", "行号", "盲读"),
     "duplicate_actions": ("重复", "同一命令", "原样重复"),
     "test_failure": ("测试失败", "回归测试"),
@@ -1131,9 +1137,16 @@ def _claims_edit(answer: str) -> bool:
 
 _OBSERVATION_FAILURE_PATTERNS = (
     r"Observation[^\n。；]{0,40}(?:完全不可见|不可见|为空|返回空)",
-    r"观测链路[^\n。；]{0,20}(?:失效|不可用|中断)",
+    r"观测链路[^\n。；]{0,20}(?:失效|不可用|中断|故障)",
     r"(?:所有|全部)工具[^\n。；]{0,50}(?:返回空|空内容|无返回)",
     r"工具(?:结果|返回)[^\n。；]{0,20}(?:不可见|看不到|为空)",
+    r"工具[^\n。；]{0,12}返回[^\n。；]{0,8}(?:空|不可见|无内容)",
+    r"(?:观测|链路)[^\n。；]{0,20}(?:故障|失效|不可用|返回空|为空)",
+)
+
+_TOOL_USE_CLAIM_PATTERNS = (
+    r"(?:调用|执行|使用)(?:了)?[^\n。；]{0,16}\d+\s*\+?\s*次[^\n。；]{0,8}(?:工具|命令)",
+    r"(?:我|本代|本次)[^\n。；]{0,12}(?:真实)?(?:调用|执行)(?:了)?[^\n。；]{0,24}(?:工具|命令)",
 )
 
 
@@ -1143,12 +1156,27 @@ def _claims_observation_failure(text: str) -> bool:
     return any(re.search(pattern, value) for pattern in _OBSERVATION_FAILURE_PATTERNS)
 
 
+def _claims_tool_use(text: str) -> bool:
+    """判断最终答案是否声称自己调用过工具。"""
+    value = str(text or "")
+    return any(re.search(pattern, value) for pattern in _TOOL_USE_CLAIM_PATTERNS)
+
+
 def _assumes_broken_observations(text: str) -> bool:
     """判断一条建议是否建立在“观测链路坏了”这个前提上。"""
     value = str(text or "")
     if _claims_observation_failure(value):
         return True
     return bool(re.search(r"观测(?:链路|恢复|失效|不可用)", value))
+
+
+def _experience_premise_invalid(entry: dict[str, Any]) -> bool:
+    """经验自身的“观测不可见”前提已被轨迹否定，不能再注入下一代提示词。"""
+    text = " ".join(
+        str(entry.get(key) or "")
+        for key in ("objective", "change_summary", "reason")
+    )
+    return _assumes_broken_observations(text)
 
 
 def _final_section(answer: str, title: str) -> str:
@@ -1181,6 +1209,8 @@ def _diagnose_generation(record: dict[str, Any]) -> dict[str, Any]:
                 modes.append("claimed_without_edit")
         if metrics and metrics.get("zero_tool"):
             modes.append("zero_tool_final")
+            if _claims_tool_use(answer):
+                modes.append("fabricated_tool_calls")
         elif not metrics and any(
             term in answer
             for term in ("没有返回 Observation", "工具都没有返回", "Observation 不可见")
@@ -1296,6 +1326,8 @@ def _experience_summary(limit: int = 10) -> str:
     if not entries:
         return ""
     recent = entries[-max(1, int(limit)) :]
+    poisoned = [entry for entry in recent if _experience_premise_invalid(entry)]
+    recent = [entry for entry in recent if not _experience_premise_invalid(entry)]
     accepted = [entry for entry in recent if entry.get("net_positive")][-4:]
     rejected = [entry for entry in recent if not entry.get("net_positive")][-4:]
     lines = [
@@ -1329,6 +1361,11 @@ def _experience_summary(limit: int = 10) -> str:
     if counts:
         top = "、".join(f"{mode}×{count}" for mode, count in counts.most_common(5))
         lines.append(f"历史失败模式统计：{top}")
+    if poisoned:
+        lines.append(
+            f"另有 {len(poisoned)} 条经验建立在“工具 Observation 不可见”的前提上，"
+            "已被轨迹否定，不再注入。"
+        )
     return "\n".join(lines)
 
 
@@ -1384,6 +1421,12 @@ _DIAGNOSTIC_PROPOSALS: dict[str, str] = {
         " Observation，则退回答案，并把真实 Observation 摘要重新注入，"
         "要求基于实际结果继续。"
     ),
+    "fabricated_tool_calls": (
+        "在 `agent.py` 的 Final Answer 处理中记录本代真实工具调用次数"
+        "（action_count）：若答案声称调用过工具，但 action_count 为 0，"
+        "则退回答案并明确告知“本代真实工具调用次数为 0”，要求先真实调用工具"
+        "再总结，不要凭猜测交卷。"
+    ),
     "claimed_without_edit": (
         "在 `agent.py` 的 Final Answer 处理中加入自进化落盘校验："
         "若答案声称改动了文件，但 `git diff --stat` 为空，则退回该答案并要求"
@@ -1428,13 +1471,11 @@ def _auto_objective() -> tuple[str, dict[str, Any]]:
         feasible = [
             item for item in feasible if _bigram_overlap(item, previous) < 0.15
         ]
-    # 如果轨迹证明 Observation 并非为空，就不要采纳“修复观测链路”这类
-    # 基于错误前提的复盘建议，改用诊断兜底提案。
-    latest_diagnosis = _diagnose_generation(latest)
-    if "false_observation_claim" in latest_diagnosis["failure_modes"]:
-        feasible = [
-            item for item in feasible if not _assumes_broken_observations(item)
-        ]
+    # 轨迹已经证明工具 Observation 正常；“修复观测链路”这类基于错误前提的
+    # 复盘建议一律不采纳，无论上一代是否被标记为 false_observation_claim。
+    feasible = [
+        item for item in feasible if not _assumes_broken_observations(item)
+    ]
     experience = _read_experience()
     proposals = []
     proposal_source = "retrospective"
@@ -1452,8 +1493,15 @@ def _auto_objective() -> tuple[str, dict[str, Any]]:
         )
     if not proposals:
         proposal_source = "diagnosis-fallback"
+        # 兜底提案来自本代诊断，被拒绝且没有落盘的目标不算“已做过”；
+        # 只和已验证有效的目标去重，避免把当前最该修的问题过滤掉。
+        accepted_recent = [
+            str(entry.get("objective") or "")
+            for entry in entries
+            if str(entry.get("decision") or "") == "accepted"
+        ][-3:]
         for order, item in enumerate(_diagnostic_proposals(latest)):
-            if any(_similar(item, old) for old in recent):
+            if any(_similar(item, old) for old in accepted_recent):
                 continue
             score, reasons = _score_proposal(item, recent, experience)
             proposals.append(
@@ -1464,7 +1512,11 @@ def _auto_objective() -> tuple[str, dict[str, Any]]:
                     "order": order,
                 }
             )
-    proposals.sort(key=lambda item: (-item["score"], item["order"]))
+    if proposal_source == "diagnosis-fallback":
+        # 诊断提案的声明顺序就是优先级：先修具体行为，再谈泛化收敛。
+        proposals.sort(key=lambda item: item["order"])
+    else:
+        proposals.sort(key=lambda item: (-item["score"], item["order"]))
     chosen = proposals[0]["text"] if proposals else ""
     info = {
         "source": f"gen-{latest.get('generation', '?')}-retrospective",
@@ -1499,10 +1551,13 @@ def _generation_history(limit: int = 6) -> str:
         if score is None:
             score = baseline.get("eval_score")
 
+        objective = _one_line(str(entry.get("objective") or ""), 100)
+        if _assumes_broken_observations(objective):
+            objective = "（基于已否定的“观测不可见”前提，已省略）"
         parts = [
             f"第 {entry.get('generation', '?')} 代",
             str(entry.get("decision") or "?"),
-            f"目标：{_one_line(str(entry.get('objective') or ''), 100)}",
+            f"目标：{objective}",
         ]
         if candidate.get("commit"):
             parts.append(f"提交：{str(candidate.get('commit'))[:12]}")
@@ -1520,6 +1575,11 @@ def _generation_history(limit: int = 6) -> str:
             lines.append("  结果：" + reason)
         suggestion = _extract_next_suggestion(entry)
         if suggestion:
+            if _assumes_broken_observations(suggestion):
+                suggestion = (
+                    "（已过滤：该建议基于“工具 Observation 不可见”的前提，"
+                    "但本代轨迹中 Observation 非空，前提不成立。）"
+                )
             lines.append("  下一代建议：" + suggestion)
     return "\n".join(lines)
 

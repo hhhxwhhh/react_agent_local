@@ -113,6 +113,10 @@ class TestEvolutionHelpers(unittest.TestCase):
         self.assertIn("不要修改、删除或新建 tests/", question)
         self.assertIn("git diff --stat", question)
         self.assertIn("改动文件：无", question)
+        self.assertIn("至少真实执行 3 次工具调用", question)
+        self.assertIn("禁止虚构工具调用", question)
+        self.assertIn("本代轨迹", question)
+        self.assertIn("执行协议", question)
 
         with_history = harness.build_generation_question(
             generation=4,
@@ -239,6 +243,35 @@ class TestEvolutionHelpers(unittest.TestCase):
         self.assertIn("false_observation_claim", diagnosis["failure_modes"])
         self.assertIn("no_change", diagnosis["failure_modes"])
 
+    def test_diagnose_fabricated_tool_calls(self):
+        record = {
+            "generation": 22,
+            "decision": "rejected",
+            "objective": "给 Final Answer 增加落盘校验",
+            "reason": "Agent 没有产生任何改动",
+            "candidate": {"changed_files": []},
+            "agent": {
+                "final_answer": (
+                    "本代我真实调用了 10+ 次工具（git status、read_file），"
+                    "全部返回空 Observation，因此不做修改。"
+                ),
+                "metrics": {
+                    "actions": 0,
+                    "read_calls": 0,
+                    "write_calls": 0,
+                    "duplicate_actions": 0,
+                    "duplicate_reads": 0,
+                    "skipped_reads": 0,
+                    "tool_errors": 0,
+                    "nonempty_observations": 0,
+                    "zero_tool": True,
+                },
+            },
+        }
+        diagnosis = evolution._diagnose_generation(record)
+        self.assertIn("zero_tool_final", diagnosis["failure_modes"])
+        self.assertIn("fabricated_tool_calls", diagnosis["failure_modes"])
+
     def test_experience_library_roundtrip_and_dedup(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "experience.jsonl"
@@ -272,6 +305,36 @@ class TestEvolutionHelpers(unittest.TestCase):
             self.assertIn("已否决", summary)
             self.assertIn("claimed_without_edit", summary)
             self.assertIn("传入 session_id", summary)
+
+    def test_experience_summary_skips_false_observation_premise(self):
+        poisoned = {
+            "generation": 15,
+            "decision": "rejected",
+            "net_positive": False,
+            "objective": "优先修复工具观测链路，Observation 完全不可见",
+            "component": "tools",
+            "failure_modes": ["false_observation_claim"],
+            "change_summary": "",
+        }
+        healthy = {
+            "generation": 19,
+            "decision": "accepted",
+            "net_positive": True,
+            "objective": "补 session_id",
+            "component": "agent_loop",
+            "failure_modes": [],
+            "change_summary": "传入 session_id",
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "experience.jsonl"
+            with patch.object(evolution, "EXPERIENCE_FILE", path):
+                evolution._append_experience(poisoned)
+                evolution._append_experience(healthy)
+                summary = evolution._experience_summary()
+
+        self.assertIn("传入 session_id", summary)
+        self.assertNotIn("优先修复工具观测链路", summary)
+        self.assertIn("已被轨迹否定", summary)
 
     def test_auto_objective_scores_against_experience(self):
         latest = {
@@ -422,6 +485,48 @@ class TestEvolutionHelpers(unittest.TestCase):
         self.assertIn("轨迹一致性", chosen)
         self.assertNotIn("修复观测链路", chosen)
 
+    def test_auto_objective_filters_observation_premise_without_flag(self):
+        # 第 22 代没有 false_observation_claim（零工具调用），但复盘建议仍然
+        # 复述“观测链路不可见”，也必须被过滤。
+        latest = {
+            "generation": 22,
+            "decision": "rejected",
+            "objective": "给 Final Answer 增加落盘校验",
+            "reason": "Agent 没有产生任何改动",
+            "candidate": {"changed_files": []},
+            "agent": {
+                "final_answer": (
+                    "Final Answer:\n"
+                    "本代我真实调用了 10+ 次工具，但全部返回空 Observation。\n"
+                    "- 对下一代 Harness 的建议：\n"
+                    "1. 优先修复观测链路，所有工具 Observation 完全不可见\n"
+                ),
+                "metrics": {
+                    "actions": 0,
+                    "read_calls": 0,
+                    "write_calls": 0,
+                    "duplicate_actions": 0,
+                    "duplicate_reads": 0,
+                    "skipped_reads": 0,
+                    "tool_errors": 0,
+                    "nonempty_observations": 0,
+                    "zero_tool": True,
+                },
+            },
+        }
+        entries = [
+            {"generation": 21, "decision": "rejected", "objective": "上一目标"},
+            latest,
+        ]
+        with patch.object(evolution, "_read_ledger", return_value=entries), patch.object(
+            evolution, "_read_experience", return_value=[]
+        ):
+            chosen, info = evolution._auto_objective()
+
+        self.assertEqual(info["proposal_source"], "diagnosis-fallback")
+        self.assertNotIn("修复观测链路", chosen)
+        self.assertIn("action_count", chosen)
+
     def test_generation_history_summary(self):
         entries = [
             {
@@ -462,6 +567,30 @@ class TestEvolutionHelpers(unittest.TestCase):
         self.assertIn("第 2 代", history)
         self.assertIn("rejected", history)
         self.assertIn("候选测试未通过", history)
+
+    def test_generation_history_filters_false_observation_premise(self):
+        entries = [
+            {
+                "generation": 15,
+                "decision": "rejected",
+                "objective": "修复观测链路，所有工具 Observation 不可见",
+                "candidate": {"changed_files": []},
+                "reason": "Agent 没有产生任何改动",
+                "agent": {
+                    "final_answer": (
+                        "Final Answer:\n- 对下一代 Harness 的建议："
+                        "优先修复工具观测链路，所有工具 Observation 完全不可见"
+                    )
+                },
+            }
+        ]
+        with patch.object(evolution, "_read_ledger", return_value=entries):
+            history = evolution._generation_history()
+
+        self.assertNotIn("所有工具 Observation 完全不可见", history)
+        self.assertNotIn("修复观测链路", history)
+        self.assertIn("已过滤", history)
+        self.assertIn("已省略", history)
 
     def test_evaluation_suite_passes(self):
         import evaluation
