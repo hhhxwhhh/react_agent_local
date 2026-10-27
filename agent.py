@@ -722,6 +722,8 @@ class ReActAgent:
         history_summary_count: int,
         step: int,
         cancel_event: Event | None,
+        landed_files: list[str] | None = None,
+        verification_status: str = "",
     ) -> str:
         """对跨轮会话历史做增量摘要，返回最终注入提示词的文本。"""
         messages = [message for message in (history or []) if isinstance(message, dict)]
@@ -769,10 +771,14 @@ class ReActAgent:
                     f"{summary or '（无）'}\n\n"
                     "## 新增的较早对话（待压缩数据）\n"
                     f"{chunk_text}\n\n"
+                    "## 已落盘改动与验证状态（系统记录，必须原样保留）\n"
+                    f"- 已落盘文件：{', '.join(landed_files) if landed_files else '（无）'}\n"
+                    f"- 最近验证状态：{verification_status or '（未运行）'}\n\n"
                     "## 输出要求\n"
                     "把已有摘要和新增对话合并成一份新的紧凑摘要。\n"
                     "按下面结构输出：\n"
                     "- 用户目标、偏好与约束：\n"
+                    "- 已落盘改动与验证状态（必须与上方系统记录一致，不得写成“尚未修改”）：\n"
                     "- 已经确认的事实与结论：\n"
                     "- 关键数字、URL 与来源：\n"
                     "- 尚未解决的问题：\n"
@@ -887,6 +893,8 @@ class ReActAgent:
             history_summary_count,
             step=1,
             cancel_event=cancel_event,
+            landed_files=self.landed_files,
+            verification_status=self.verification_status,
         )
         scratchpad = ""
         seen_calls: set[str] = set()
