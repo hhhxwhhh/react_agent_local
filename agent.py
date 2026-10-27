@@ -112,6 +112,14 @@ def _command_succeeded(observation: str) -> bool:
 def _run_command_landed(command: str, observation: str) -> bool:
     """成功的非只读 run_command 视为已落地修改。"""
     return (not _command_is_readonly(command)) and _command_succeeded(observation)
+
+
+def _is_evolution_task(question: str) -> bool:
+    """识别自进化任务：这类任务必须先实际探索，不能零工具调用直接交卷。"""
+    text = str(question or "")
+    return "自进化 Harness" in text or "修改当前仓库中的自己" in text
+
+
 # 连续两次被判定为重复调用，或连续三次格式错误后，提前收口。
 MAX_CONSECUTIVE_DUPLICATES = 2
 MAX_CONSECUTIVE_INVALID = 3
@@ -900,6 +908,8 @@ class ReActAgent:
         seen_calls: set[str] = set()
         consecutive_duplicates = 0
         consecutive_invalid = 0
+        action_count = 0
+        premature_final_rejected = False
         read_only_streak = 0
         stalled = False
         stall_reason = ""
@@ -944,6 +954,33 @@ class ReActAgent:
 
             if kind == "final":
                 answer = str(payload).strip()
+                if (
+                    _is_evolution_task(question)
+                    and action_count == 0
+                    and not premature_final_rejected
+                    and step < self.max_steps
+                ):
+                    # 模型偶尔会在零工具调用时断言“工具没有返回结果”并直接交卷。
+                    # 自进化任务必须先真实探索一次，再决定是否需要改动。
+                    premature_final_rejected = True
+                    scratchpad += (
+                        "\nObservation: [系统提示] 你还没有执行任何工具调用，"
+                        "刚才的 Final Answer 已被退回。本代是自进化任务，"
+                        "请先实际读取与目标相关的源码（read_file/search_files），"
+                        "确认现状后再决定是否修改；如果你认为工具不可用，"
+                        "也请先真实调用一次验证，不要凭猜测结束。\n"
+                    )
+                    self._say(
+                        _yellow("(零工具调用，已退回 Final Answer，要求先实际探索)")
+                    )
+                    self._emit(
+                        {
+                            "type": "note",
+                            "step": step,
+                            "text": "零工具调用，Final Answer 已退回",
+                        }
+                    )
+                    continue
                 self.last_citations = (
                     extract_citations(answer) or _trace_sources(self.last_trace)
                 )
@@ -979,6 +1016,7 @@ class ReActAgent:
                     self._say(_dim(f"Action Input（解析失败）: {raw_input}"))
                 else:
                     consecutive_invalid = 0
+                    action_count += 1
                     self._say(
                         _cyan("Action Input: " + json.dumps(args, ensure_ascii=False))
                     )

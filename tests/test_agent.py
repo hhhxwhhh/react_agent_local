@@ -730,6 +730,33 @@ class TestLoopGuards(unittest.TestCase):
         self.assertTrue(agent.last_trace[1].get("duplicate"))
         self.assertIn("重复调用", agent.last_trace[1]["observation"])
 
+    def test_evolution_task_rejects_final_answer_without_tool_calls(self):
+        llm = FakeLLM(
+            [
+                "Thought: 工具似乎不可用。\nFinal Answer: 没有改动。",
+                'Thought: 先读文件。\nAction: read_file\n'
+                'Action Input: {"path": "README.md", "max_chars": 80}',
+                "Thought: 已经读到内容。\nFinal Answer: 完成探索。",
+            ]
+        )
+        executed: list[str] = []
+
+        def fake_run_tool(name, args, context=None):
+            executed.append(name)
+            return "文件：README.md\n（测试内容）"
+
+        question = (
+            "你正在参与“自进化 Harness”的第 1 代迭代。"
+            "你的任务不是回答问题，而是修改当前仓库中的自己。"
+        )
+        with patch.object(agent_module, "run_tool", side_effect=fake_run_tool):
+            agent = ReActAgent(llm, max_steps=4, verbose=False, use_color=False)
+            answer = agent.run(question)
+
+        self.assertEqual(answer, "完成探索。")
+        self.assertEqual(executed, ["read_file"])
+        self.assertEqual(agent.last_llm_calls, 3)
+
     def test_progress_nudge_after_read_only_streak(self):
         with tempfile.TemporaryDirectory() as folder:
             first = Path(folder) / "first.txt"
