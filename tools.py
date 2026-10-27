@@ -165,6 +165,33 @@ def _overlap_ratio(
     return min(1.0, overlap / span)
 
 
+# 连续硬跳过计数：read_file 命中硬跳过时 +1，成功读取时清零。
+# agent.py 在每步工具调用后读取该计数，达到阈值时注入“请改用 search_files”
+# 的系统消息，形成工具层 + 循环层的双重收敛。
+_READ_SKIP_STREAK = 0
+READ_SKIP_STREAK_LIMIT = 2
+
+
+def consume_read_skip_streak() -> int:
+    """返回并清零连续硬跳过计数（供 agent.py 循环层消费）。"""
+    global _READ_SKIP_STREAK
+    streak = _READ_SKIP_STREAK
+    _READ_SKIP_STREAK = 0
+    return streak
+
+
+def _bump_read_skip_streak() -> None:
+    """记录一次硬跳过。"""
+    global _READ_SKIP_STREAK
+    _READ_SKIP_STREAK += 1
+
+
+def _reset_read_skip_streak() -> None:
+    """成功读取后清零连续硬跳过计数。"""
+    global _READ_SKIP_STREAK
+    _READ_SKIP_STREAK = 0
+
+
 def _read_skip_notice(key: str, first: int, last: int) -> str:
     """读取前检查：若本次区间与历史区间高度重叠，返回硬跳过提示。
 
@@ -2024,6 +2051,7 @@ def read_file(
         # 硬跳过：同一文件同一/高度重叠区间直接返回提示，不实际读取。
         skip_notice = _read_skip_notice(key, first, last)
         if skip_notice:
+            _bump_read_skip_streak()
             return skip_notice
     except Exception:
         # 护栏绝不能影响正常读取
@@ -2031,6 +2059,7 @@ def read_file(
         first = last = 0
 
     result = _read_file_impl(path, max_chars, start_line, end_line)
+    _reset_read_skip_streak()
     try:
         if key is not None:
             # 记录区间时把“开放末尾”哨兵替换为实际文件行数，避免

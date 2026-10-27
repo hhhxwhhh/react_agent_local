@@ -40,7 +40,12 @@ from llm import DeepSeekLLM, LLMError
 from memory import GLOBAL_MEMORY_FILE, JsonMemory, format_memory_context
 from prompts import FORCE_FINAL_PROMPT, build_system_prompt
 from tool_context import ToolContext
-from tools import TOOL_SPECS, forget_memory, run_tool
+from tools import (
+    TOOL_SPECS,
+    consume_read_skip_streak,
+    forget_memory,
+    run_tool,
+)
 
 STOP_SEQUENCES = ["Observation:", "Observation："]
 
@@ -1049,6 +1054,27 @@ class ReActAgent:
                         observation = run_tool(
                             tool_name, args, context=self.tool_context
                         )
+                        # 工具层硬跳过与循环层联动：连续多次被硬跳过时，
+                        # 直接注入系统消息，强制模型改用 search_files 定位。
+                        skip_streak = consume_read_skip_streak()
+                        if skip_streak >= 2:
+                            observation += (
+                                "\n[系统提示] 你已连续 "
+                                f"{skip_streak} 次请求读取高度重叠的行区间，"
+                                "均被硬跳过。请立即停止重复读取同一文件区间，"
+                                "改用 search_files（search_content=true）定位关键词行号，"
+                                "或直接基于已有 Observation 输出 Final Answer。"
+                            )
+                            self._emit(
+                                {
+                                    "type": "note",
+                                    "step": step,
+                                    "text": (
+                                        f"连续 {skip_streak} 次硬跳过重复读取，"
+                                        "已注入改用 search_files 的系统提示"
+                                    ),
+                                }
+                            )
                     self._check_cancel(cancel_event)
 
                 self._emit(
