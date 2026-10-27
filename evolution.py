@@ -25,10 +25,11 @@ import subprocess
 import sys
 import tempfile
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator, TextIO
 
 import harness
 from agent import ReActAgent, _confirm_tool_permission, global_memory_context
@@ -46,6 +47,7 @@ ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data" / "evolution"
 LEDGER_FILE = DATA_DIR / "ledger.jsonl"
 REJECTED_DIR = DATA_DIR / "rejected"
+GENERATION_LOG_DIR = DATA_DIR / "logs"
 TAG_PREFIX = "evo-gen-"
 
 # 这些路径由外层裁判保护；Agent 只能修改它们之外的文件。
@@ -275,6 +277,59 @@ def _run(
         check=check,
         env=_env(),
     )
+
+
+class _Tee:
+    """把 stdout/stderr 同时写到控制台和完整日志文件。"""
+
+    def __init__(self, *streams: TextIO | None) -> None:
+        self.streams = [stream for stream in streams if stream is not None]
+
+    def write(self, data: str) -> int:
+        for stream in self.streams:
+            try:
+                stream.write(data)
+                stream.flush()
+            except (OSError, ValueError):
+                continue
+        return len(data)
+
+    def flush(self) -> None:
+        for stream in self.streams:
+            try:
+                stream.flush()
+            except (OSError, ValueError):
+                continue
+
+    def isatty(self) -> bool:
+        return False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.streams[0], name)
+
+
+@contextmanager
+def _capture_generation_log(generation: int) -> Iterator[Path]:
+    """为一代创建独立完整日志，并同时保留控制台输出。"""
+    GENERATION_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    path = GENERATION_LOG_DIR / f"gen-{generation:03d}.log"
+    handle = path.open("a", encoding="utf-8", newline="\n")
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    sys.stdout = _Tee(original_stdout, handle)
+    sys.stderr = _Tee(original_stderr, handle)
+    try:
+        print(f"\n===== 自进化第 {generation} 代完整日志 =====")
+        print(f"开始时间：{_now()}")
+        yield path
+    finally:
+        print(f"结束时间：{_now()}")
+        sys.stdout = original_stdout
+        sys.stderr = original_stderr
+        try:
+            handle.flush()
+        finally:
+            handle.close()
 
 
 def _git(
@@ -880,7 +935,7 @@ def _run_agent(
     args: argparse.Namespace,
     question: str,
     permission_log: list[dict[str, Any]],
-) -> tuple[str, dict[str, Any], int]:
+) -> tuple[str, dict[str, Any], int, list[dict[str, Any]]]:
     llm = DeepSeekLLM(model=args.model, temperature=args.temperature)
     context = ToolContext(
         default_scope="global",
@@ -895,7 +950,37 @@ def _run_agent(
         default_memory_scope="global",
     )
     answer = agent.run(question, memory_context=global_memory_context(question))
-    return answer, dict(agent.last_usage or {}), int(agent.last_llm_calls)
+    return (
+        answer,
+        dict(agent.last_usage or {}),
+        int(agent.last_llm_calls),
+        list(agent.last_trace),
+    )
+
+
+def _write_generation_trace(
+    generation: int,
+    question: str,
+    answer: str,
+    trace: list[dict[str, Any]],
+) -> Path:
+    """保存完整轨迹：每轮 Thought、完整 Action Input 和未截断 Observation。"""
+    GENERATION_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    path = GENERATION_LOG_DIR / f"gen-{generation:03d}.trace.jsonl"
+    with path.open("w", encoding="utf-8", newline="\n") as handle:
+        header = {
+            "type": "generation",
+            "generation": generation,
+            "started_at": _now(),
+            "question": question,
+        }
+        handle.write(json.dumps(header, ensure_ascii=False, default=str) + "\n")
+        for item in trace:
+            entry = {"type": "step", **item}
+            handle.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
+        final = {"type": "final", "finished_at": _now(), "answer": answer}
+        handle.write(json.dumps(final, ensure_ascii=False, default=str) + "\n")
+    return path
 
 
 def _preflight(root: Path) -> str | None:
@@ -1125,9 +1210,21 @@ def run_single_generation(args: argparse.Namespace) -> int:
             history=history_text,
         )
         permission_log: list[dict[str, Any]] = record["agent"]["permissions"]
+        log_path = GENERATION_LOG_DIR / f"gen-{generation:03d}.log"
+        trace_path = GENERATION_LOG_DIR / f"gen-{generation:03d}.trace.jsonl"
+        result_path = GENERATION_LOG_DIR / f"gen-{generation:03d}.result.json"
+        record["agent"].update(
+            {
+                "log_file": str(log_path.relative_to(ROOT)),
+                "trace_file": str(trace_path.relative_to(ROOT)),
+                "result_file": str(result_path.relative_to(ROOT)),
+            }
+        )
         print("[harness] 调用当前版本 Agent 修改自身……")
         try:
-            answer, usage, llm_calls = _run_agent(args, question, permission_log)
+            answer, usage, llm_calls, trace = _run_agent(
+                args, question, permission_log
+            )
         except KeyboardInterrupt:
             _abort(
                 root=ROOT,
@@ -1146,6 +1243,12 @@ def run_single_generation(args: argparse.Namespace) -> int:
                 reason=f"Agent 运行失败：{type(exc).__name__}: {exc}",
             )
             return 1
+
+        try:
+            _write_generation_trace(generation, question, str(answer or ""), trace)
+            print(f"[harness] 完整轨迹已保存：{trace_path.relative_to(ROOT)}")
+        except OSError as exc:
+            print(f"[harness] 完整轨迹保存失败：{exc}")
 
         record["agent"].update(
             {
@@ -1349,6 +1452,19 @@ def run_single_generation(args: argparse.Namespace) -> int:
     finally:
         record["finished_at"] = _now()
         record["duration_seconds"] = round(time.monotonic() - started, 2)
+        record.setdefault("agent", {})["log_file"] = str(
+            (GENERATION_LOG_DIR / f"gen-{generation:03d}.log").relative_to(ROOT)
+        )
+        try:
+            GENERATION_LOG_DIR.mkdir(parents=True, exist_ok=True)
+            result_path = GENERATION_LOG_DIR / f"gen-{generation:03d}.result.json"
+            result_path.write_text(
+                json.dumps(record, ensure_ascii=False, indent=2, default=str),
+                encoding="utf-8",
+            )
+            print(f"[harness] 完整结果已保存：{result_path.relative_to(ROOT)}")
+        except OSError as exc:
+            print(f"[harness] 无法写入完整结果：{exc}")
         try:
             _append_ledger(record)
         except OSError as exc:
@@ -1502,7 +1618,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.generations > 1 and not args.once:
         return _supervisor(args)
-    return run_single_generation(args)
+    generation = _next_generation(ROOT)
+    with _capture_generation_log(generation):
+        return run_single_generation(args)
 
 
 if __name__ == "__main__":

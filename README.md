@@ -256,6 +256,14 @@ python evolution.py --generations 3 --yes \
 （已 gitignore），最近几代的结论、失败原因和“下一代建议”会自动注入下一代
 提示词，避免重复踩坑。
 
+每代都会在 `data/evolution/logs/` 留下完整记录（不进入 Git）：
+
+- `gen-N.log`：控制台完整输出，含每轮 Thought/Action/Observation、权限决定、
+  测试与评测摘要；
+- `gen-N.trace.jsonl`：完整轨迹，保留未截断的 Action Input 和 Observation；
+- `gen-N.result.json`：完整结果，含基线/候选的测试、安全检查和评测全文，
+  以及接受/拒绝原因与回滚信息。
+
 `evaluation.py` 是本地离线行为评测：脚本化 LLM 驱动真实 ReAct 循环，覆盖
 文件读取、错误恢复、会话记忆、批量补丁原子性、权限拒绝、受保护路径、重复
 调用、未知工具、强制收口和引用提取，不联网、不写仓库。它提供的是“行为无
@@ -636,7 +644,7 @@ react_agent/
 
 ## 7. 测试
 
-离线测试（共 150 个用例，不需要 Key、不需要网络；符号链接用例在无权限的
+离线测试（共 151 个用例，不需要 Key、不需要网络；符号链接用例在无权限的
 Windows 环境会自动跳过）：
 
 ```bash

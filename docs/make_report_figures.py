@@ -227,7 +227,7 @@ def figure_tests():
         ("test_sessions.py", "会话 / 记忆 / Web API", 36),
         ("test_vector_memory.py", "向量检索 / 位置与地理", 28),
         ("test_memory.py", "记忆并发 / TTL / 容量", 13),
-        ("test_evolution.py", "自进化裁判 / 安全沙箱", 12),
+        ("test_evolution.py", "自进化裁判 / 安全沙箱", 13),
     ]
     fig, ax = plt.subplots(figsize=(11, 5.6))
     fig.subplots_adjust(left=0.34, right=0.92, top=0.76, bottom=0.16)
@@ -256,7 +256,7 @@ def figure_tests():
             color=INK,
         )
 
-    fig.text(0.06, 0.93, "离线测试分布：150 个用例", fontsize=20, fontweight="bold", color=INK)
+    fig.text(0.06, 0.93, "离线测试分布：151 个用例", fontsize=20, fontweight="bold", color=INK)
     fig.text(
         0.06,
         0.865,
@@ -267,7 +267,7 @@ def figure_tests():
     fig.text(
         0.92,
         0.80,
-        "149 通过\n1 跳过",
+        "150 通过\n1 跳过",
         ha="right",
         va="top",
         fontsize=13,

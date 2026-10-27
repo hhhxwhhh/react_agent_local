@@ -169,6 +169,40 @@ class TestEvolutionHelpers(unittest.TestCase):
         self.assertEqual(result["passed"], result["total"], result["failed"])
         self.assertEqual(result["score"], 1.0)
 
+    def test_generation_logs_capture_full_output_and_trace(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_dir = Path(temp_dir) / "logs"
+            with patch.object(evolution, "GENERATION_LOG_DIR", log_dir):
+                with evolution._capture_generation_log(7) as log_path:
+                    print("完整日志探针")
+                trace_path = evolution._write_generation_trace(
+                    7,
+                    "完整问题",
+                    "完整答案",
+                    [
+                        {
+                            "step": 1,
+                            "thought": "读文件",
+                            "tool": "read_file",
+                            "input": {"path": "x.txt"},
+                            "observation": "O" * 2000,
+                        }
+                    ],
+                )
+
+            log_text = log_path.read_text(encoding="utf-8")
+            self.assertIn("完整日志探针", log_text)
+            self.assertIn("第 7 代", log_text)
+            self.assertEqual(trace_path.name, "gen-007.trace.jsonl")
+            lines = trace_path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(lines), 3)
+            header = json.loads(lines[0])
+            step = json.loads(lines[1])
+            final = json.loads(lines[2])
+            self.assertEqual(header["question"], "完整问题")
+            self.assertEqual(step["observation"], "O" * 2000)
+            self.assertEqual(final["answer"], "完整答案")
+
     def test_next_generation_from_ledger(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger = Path(temp_dir) / "ledger.jsonl"
