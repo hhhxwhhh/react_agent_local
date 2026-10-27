@@ -19,8 +19,6 @@
   并带本地向量索引：注入提示词前会按向量相似度与关键词相关性重排
 - 循环自带重复调用拦截、格式错误收口、取消检查和 token 用量统计
 
-> 原理拆解、ReAct 论文精读、评测设计、已知问题与组会 Q&A：[AGENT_DEEP_DIVE.md](AGENT_DEEP_DIVE.md)
-
 ---
 
 ## 1. 需要什么 API Key
@@ -661,8 +659,6 @@ react_agent/
 │   ├── test_sessions.py     # 会话、分层记忆、Web API
 │   ├── test_vector_memory.py # 向量检索、关键词兜底、位置与地理查询工具
 │   └── test_evolution.py    # 自进化裁判、历史注入、离线评测、沙箱安全检查
-├── AGENT_DEEP_DIVE.md  # 原理、评测与组会答辩手册
-├── 2210.03629v3.pdf    # ReAct 原论文（ICLR 2023）
 ├── requirements.txt
 ├── .env.example
 └── README.md

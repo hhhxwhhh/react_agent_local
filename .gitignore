@@ -2,6 +2,11 @@
 .env
 data/
 
+# 非必要文档：只在本地保留，不随仓库上传
+docs/
+AGENT_DEEP_DIVE.md
+2210.03629v3.pdf
+
 # Python
 __pycache__/
 *.py[cod]
