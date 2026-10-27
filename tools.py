@@ -2592,6 +2592,11 @@ def run_command(
         parts.append(f"ERROR: 命令执行超时（{limit_timeout} 秒），已终止")
     else:
         parts.append(f"退出码：{process.returncode}")
+        if process.returncode != 0:
+            parts.append(
+                f"ERROR: 命令失败（退出码 {process.returncode}），"
+                "请检查 stderr 并据此调整，不要当作成功继续。"
+            )
     parts.append(f"耗时：{elapsed:.2f}s")
 
     output_parts = []
