@@ -1839,8 +1839,17 @@ def list_files(
     return "\n".join(lines)
 
 
-def read_file(path: str, max_chars: int = 4000) -> str:
-    """读取本机文本文件。"""
+def read_file(
+    path: str,
+    max_chars: int = 4000,
+    start_line: int = 0,
+    end_line: int = 0,
+) -> str:
+    """读取本机文本文件；可用 1-based 行区间分段读取大文件。
+
+    start_line/end_line 为 0 时分别表示“从第一行开始”和“读到文件末尾”。
+    行区间包含 end_line；返回内容仍受 max_chars 限制。
+    """
     target = _resolve_path(path)
     if not target.exists():
         raise ValueError(f"文件不存在：{_display_path(target)}")
@@ -1850,9 +1859,52 @@ def read_file(path: str, max_chars: int = 4000) -> str:
     size = target.stat().st_size
     text = _read_text_file(target)
     limit = max(200, min(int(max_chars), 20000))
+    try:
+        start = int(start_line or 0)
+        end = int(end_line or 0)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("start_line/end_line 必须是整数") from exc
+    if start < 0 or end < 0:
+        raise ValueError("start_line/end_line 不能为负数")
+
+    if start or end:
+        lines = text.splitlines()
+        total_lines = len(lines)
+        if total_lines == 0:
+            header = f"文件：{_display_path(target)}（{size} 字节，空文件）\n\n"
+            return header
+        first = 1 if start == 0 else start
+        if first > total_lines:
+            raise ValueError(
+                f"start_line={first} 超过文件总行数 {total_lines}"
+            )
+        last = total_lines if end == 0 else min(end, total_lines)
+        if last < first:
+            raise ValueError("end_line 不能小于 start_line")
+        selected = "\n".join(lines[first - 1 : last])
+        if text.endswith(("\n", "\r")) and last == total_lines:
+            selected += "\n"
+        header = (
+            f"文件：{_display_path(target)}"
+            f"（{size} 字节，第 {first}-{last} 行 / 共 {total_lines} 行）\n\n"
+        )
+        if len(selected) > limit:
+            return (
+                header
+                + selected[:limit]
+                + f"\n...[已截断，本段共 {len(selected)} 字符；"
+                "请缩小行区间或提高 max_chars]"
+            )
+        return header + selected
+
     header = f"文件：{_display_path(target)}（{size} 字节）\n\n"
     if len(text) > limit:
-        return header + text[:limit] + f"\n...[已截断，共 {len(text)} 字符]"
+        return (
+            header
+            + text[:limit]
+            + f"\n...[已截断，共 {len(text)} 字符；"
+            "请用 start_line/end_line 分段读取]"
+        )
     return header + text
 
 
@@ -2840,7 +2892,7 @@ TOOL_SPECS: dict[str, dict] = {
         },
     },
     "read_file": {
-        "description": "读取本机文本文件，适合查看源码、配置、笔记和数据。path 可为绝对路径；相对路径以项目根目录为基准。",
+        "description": "读取本机文本文件，适合查看源码、配置、笔记和数据。大文件用 start_line/end_line 分段读取，避免一次读不完或反复读同一文件。path 可为绝对路径；相对路径以项目根目录为基准。",
         "parameters": {
             "type": "object",
             "properties": {
@@ -2851,6 +2903,14 @@ TOOL_SPECS: dict[str, dict] = {
                 "max_chars": {
                     "type": "integer",
                     "description": "最多读取多少字符，默认 4000，最大 20000",
+                },
+                "start_line": {
+                    "type": "integer",
+                    "description": "起始行，1-based；0（默认）表示从第一行开始",
+                },
+                "end_line": {
+                    "type": "integer",
+                    "description": "结束行（包含），1-based；0（默认）表示读到文件末尾",
                 },
             },
             "required": ["path"],

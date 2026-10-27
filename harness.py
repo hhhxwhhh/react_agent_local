@@ -13,8 +13,9 @@ from __future__ import annotations
 HARNESS_VERSION = "1"
 
 DEFAULT_OBJECTIVE = (
-    "先阅读当前实现和测试，找出一个具体、可验证的弱点；提出最小假设并实现改进。"
-    "优先提升稳定性、可测试性、工具闭环或提示词的可靠性，不要做大范围重写。"
+    "先阅读 3-5 个关键文件，找出一个具体、可验证的弱点；提出最小假设并在 20 步内"
+    "实现改进。优先提升稳定性、可测试性、工具闭环或提示词的可靠性，不要做大范围"
+    "重写，也不要试图读完整个仓库。"
 )
 
 EVOLVABLE_HINT = (
@@ -73,11 +74,23 @@ def build_generation_question(
 请利用这些记录：被拒绝的方案不要原样重复；如果失败原因是测试、边界或预算，
 先解决该原因；已接受的方向只做增量改进。
 
+## 探索与收敛预算
+- 每代最多阅读 3-5 个关键文件；大文件用 read_file 的 start_line/end_line
+  分段读取，不要反复从同一位置读。
+- 不要重复 git status、list_files 或已经读过的文件区间；上下文压缩后先看
+  摘要里的“已做过且不要重复的动作”。
+- 前 8 步内确定一个具体假设和要改的文件，第 10 步前开始 apply_patch/write_file。
+- 每代只解决一个弱点，最多修改 2 个文件；不要试图读完整个仓库。
+- 如果到第 30 步仍未产生改动，必须选择一个低风险改进并完成，或者明确说明
+  为什么本代无法安全完成。
+- tests/ 全部冻结：不能修改、删除或新建测试文件，只能用现有测试验证。
+
 ## 硬性约束
 1. 先用 git status / git diff 观察现状，再用 read_file 阅读相关源码和测试。
 2. 只做与目标相关的最小改动；不要顺手重写无关模块，不要改测试来迁就实现。
-3. 绝对不要修改 tests/、evolution.py、evaluation.py、config.py、requirements.txt、
-   .env 或 data/。测试和裁判逻辑是选择信号，不是可优化的目标。
+3. 绝对不要修改、删除或新建 tests/ 下的文件，也不要修改 evolution.py、
+   evaluation.py、config.py、requirements.txt、.env 或 data/。测试和裁判逻辑
+   是选择信号，不是可优化的目标。
 4. 可以修改 harness.py 来改进下一代策略，但必须保留
    build_generation_question 的关键字参数签名，且新增参数必须带默认值，
    保证冻结的 evolution.py 仍能调用。

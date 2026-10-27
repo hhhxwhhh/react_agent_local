@@ -17,7 +17,7 @@ from typing import Any, Callable
 from agent import ReActAgent
 from tool_context import ToolContext
 
-SCENARIO_TOTAL = 11
+SCENARIO_TOTAL = 12
 
 
 class ScriptedLLM:
@@ -116,6 +116,31 @@ def scenario_read_file(root: Path) -> tuple[bool, str]:
         and "EVAL-READ-OK" in answer
     )
     return ok, "read_file 返回内容进入 Observation，并被最终答案复用"
+
+
+def scenario_read_file_range(root: Path) -> tuple[bool, str]:
+    path = root / "range.txt"
+    path.write_text("L1\nL2\nL3\nL4\n", encoding="utf-8")
+    agent, answer, _ = _run(
+        [
+            _action(
+                "read_file",
+                {"path": str(path), "start_line": 2, "end_line": 3},
+            ),
+            _final("读到 L2 和 L3"),
+        ]
+    )
+    observation = str(_trace(agent, 0).get("observation") or "")
+    ok = (
+        "第 2-3 行 / 共 4 行" in observation
+        and "L2" in observation
+        and "L3" in observation
+        and "L1" not in observation
+        and "L4" not in observation
+        and "L2" in answer
+        and "L3" in answer
+    )
+    return ok, "read_file 按 1-based 行区间返回，未越界读取其他行"
 
 
 def scenario_error_recovery(root: Path) -> tuple[bool, str]:
@@ -344,6 +369,7 @@ def scenario_citation(root: Path) -> tuple[bool, str]:
 
 SCENARIOS: list[tuple[str, Callable[[Path], tuple[bool, str]]]] = [
     ("read_file", scenario_read_file),
+    ("read_file_range", scenario_read_file_range),
     ("error_recovery", scenario_error_recovery),
     ("memory_roundtrip", scenario_memory_roundtrip),
     ("apply_patch_atomic", scenario_apply_patch_atomic),

@@ -341,7 +341,7 @@ Question ───────>│  DeepSeek（system + scratchpad）│
 | `get_location` | `ip` | 调用时由界面弹出位置授权；允许后返回设备 GPS（含精度、反向地理编码）；拒绝/超时回退公网 IP 城市级估算。显式传 `ip` 时直接按该 IP 查询 |
 | `geo_lookup` | `operation`, `latitude`, `longitude`, `query`, `origin`, `destination`, `limit` | 坐标与地名互转：`reverse` 坐标→地址，`forward` 地名→坐标候选，`distance` 本地算直线距离/方位角/中点。不需要额外 Key |
 | `list_files` | `path`, `recursive`, `max_entries` | 列出本机任意目录；相对路径以项目根目录为基准 |
-| `read_file` | `path`, `max_chars` | 读取本机文本文件（UTF-8/GB18030，最大 5 MB） |
+| `read_file` | `path`, `max_chars`, `start_line`, `end_line` | 读取本机文本文件（UTF-8/GB18030，最大 5 MB）；大文件可用 1-based 行区间分段读取 |
 | `write_file` | `path`, `content`, `append` | 写入或追加文本文件，自动创建父目录；需授权 |
 | `apply_patch` | `patches` | 原子地批量修改多个文件；任一匹配失败则整批不落盘；需授权 |
 | `search_files` | `keyword`, `path`, `search_content`, `max_results` | 按路径/文件名或文件内容搜索本机目录 |
@@ -644,7 +644,7 @@ react_agent/
 
 ## 7. 测试
 
-离线测试（共 151 个用例，不需要 Key、不需要网络；符号链接用例在无权限的
+离线测试（共 152 个用例，不需要 Key、不需要网络；符号链接用例在无权限的
 Windows 环境会自动跳过）：
 
 ```bash
@@ -666,7 +666,7 @@ TTL 与过期清理、容量上限、上下文预算、单轮/跨轮上下文压
 反向地理编码供应商回退、正向地理编码候选与回退、`/api/chat` 坐标传递与不落盘、
 非法坐标 422 校验、历史与记忆注入、SSE 流式接口、会话落盘、自进化裁判的
 冻结路径检查、diff 行数预算、测试/评分解析、临时沙箱安全探针、历史迭代摘要
-与建议闭环，以及 11 个离线行为评测场景（读取、错误恢复、会话记忆、批量补丁
+与建议闭环，以及 12 个离线行为评测场景（读取、行区间读取、错误恢复、会话记忆、批量补丁
 原子性、权限拒绝、受保护路径、重复调用、未知工具、强制收口、引用提取）。
 
 工具联网检查：
@@ -708,7 +708,8 @@ python agent.py --check-tools
 
 **上下文压缩会不会丢信息？**
 - 压缩只针对较早步骤/对话，最近内容始终保留原文；摘要提示词要求保留目标、事实、
-  数字、URL、错误和未决问题，并禁止编造。
+  数字、URL、错误和未决问题，并明确列出“已做过且不要重复的动作”和“下一步唯一
+  动作”，避免压缩后重新从头探索。
 - 摘要模型失败时，会退回本地抽取式压缩（保留动作、Observation、URL、ERROR 行），
   不会因为压缩失败而中断本轮回答。
 - 阈值可用 `CONTEXT_COMPACT_CHARS`、`HISTORY_COMPACT_MESSAGES` 等环境变量调整；

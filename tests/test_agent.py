@@ -306,6 +306,39 @@ class TestFileTools(unittest.TestCase):
         write_file(f"{self.folder}/log.txt", "B", append=True)
         self.assertIn("AB", read_file(f"{self.folder}/log.txt"))
 
+    def test_read_file_line_range(self):
+        path = f"{self.folder}/lines.txt"
+        write_file(path, "one\ntwo\nthree\nfour\n")
+
+        middle = read_file(path, start_line=2, end_line=3)
+        self.assertIn("第 2-3 行 / 共 4 行", middle)
+        self.assertIn("two", middle)
+        self.assertIn("three", middle)
+        self.assertNotIn("one", middle)
+        self.assertNotIn("four", middle)
+
+        tail = read_file(path, start_line=3)
+        self.assertIn("three", tail)
+        self.assertIn("four", tail)
+        self.assertNotIn("two", tail)
+
+        head = read_file(path, end_line=2)
+        self.assertIn("one", head)
+        self.assertIn("two", head)
+        self.assertNotIn("three", head)
+
+        coerced = run_tool(
+            "read_file",
+            {"path": path, "start_line": "2", "end_line": "2"},
+        )
+        self.assertIn("two", coerced)
+        self.assertNotIn("three", coerced)
+
+        with self.assertRaises(ValueError):
+            read_file(path, start_line=5)
+        with self.assertRaises(ValueError):
+            read_file(path, start_line=3, end_line=2)
+
     def test_workspace_mode_escape_blocked(self):
         with patch.object(tools, "FILE_ACCESS_MODE", "workspace"):
             with self.assertRaises(ValueError):
@@ -629,6 +662,8 @@ class TestLoopGuards(unittest.TestCase):
         self.assertEqual(answer, "已基于压缩后的上下文回答。")
         self.assertEqual(len(llm.calls), 3)
         self.assertIn("上下文压缩器", llm.calls[1][0])
+        self.assertIn("已做过且不要重复的动作", llm.calls[1][1])
+        self.assertIn("当前假设与下一步唯一动作", llm.calls[1][1])
         self.assertIn("[较早步骤摘要", llm.calls[2][1])
         self.assertIn("任务目标：计算。", llm.calls[2][1])
         self.assertIn("[最近步骤原文]", llm.calls[2][1])

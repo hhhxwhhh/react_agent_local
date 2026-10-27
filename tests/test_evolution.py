@@ -108,6 +108,9 @@ class TestEvolutionHelpers(unittest.TestCase):
         self.assertIn("不要执行 git commit", question)
         self.assertIn("build_generation_question", question)
         self.assertIn("暂无历史记录", question)
+        self.assertIn("探索与收敛预算", question)
+        self.assertIn("start_line/end_line", question)
+        self.assertIn("不要修改、删除或新建 tests/", question)
 
         with_history = harness.build_generation_question(
             generation=4,
