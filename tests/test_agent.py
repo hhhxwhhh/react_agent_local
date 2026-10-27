@@ -160,14 +160,23 @@ class TestTools(unittest.TestCase):
         self.assertTrue(result.startswith("ERROR"))
         self.assertIn("未知工具", result)
 
+        # 内部实现可以保留，但不能重新进入 Agent 的动作空间。
+        self.assertEqual(len(tools.TOOL_SPECS), 15)
+        self.assertFalse(tools.INTERNAL_ONLY_TOOLS & set(tools.TOOL_SPECS))
+        self.assertFalse(tools.INTERNAL_ONLY_TOOLS & set(tools.TOOL_FUNCS))
+        for removed in tools.INTERNAL_ONLY_TOOLS:
+            with self.subTest(tool=removed):
+                blocked = run_tool(removed, {})
+                self.assertTrue(blocked.startswith("ERROR"))
+                self.assertIn("未知工具", blocked)
+
     def test_run_tool_catches_error(self):
-        result = run_tool("calculate", {"expression": "__import__('os')"})
+        result = run_tool("read_file", {"path": "no_such_file_for_error_test.txt"})
         self.assertTrue(result.startswith("ERROR"))
 
     def test_run_tool_optional_args(self):
-        result = run_tool("get_current_time", {})
-        self.assertIn("当前时间", result)
-        self.assertIn("Asia/Shanghai", result)
+        result = run_tool("list_files", {"max_entries": 5})
+        self.assertIn("目录", result)
 
     def test_current_time_known_city(self):
         result = get_current_time("北京")
@@ -791,28 +800,29 @@ class TestReActLoop(unittest.TestCase):
     def test_action_then_final(self):
         llm = FakeLLM(
             [
-                'Thought: 需要先计算。\nAction: calculate\n'
-                'Action Input: {"expression": "(12+8)*3"}',
-                "Thought: I now know the final answer\nFinal Answer: 结果是 60。",
+                'Thought: 需要先读取文件。\nAction: read_file\n'
+                'Action Input: {"path": "demo/tool_check.txt"}',
+                "Thought: I now know the final answer\nFinal Answer: 文件内容已读取。",
             ]
         )
         agent = ReActAgent(llm, max_steps=4, verbose=False, use_color=False)
-        answer = agent.run("(12+8)*3 等于多少？")
+        answer = agent.run("读取 demo/tool_check.txt")
 
-        self.assertEqual(answer, "结果是 60。")
+        self.assertEqual(answer, "文件内容已读取。")
         self.assertEqual(len(llm.calls), 2)
-        self.assertIn("Observation: (12+8)*3 = 60", llm.calls[1][1])
+        self.assertIn("Observation: 文件：demo/tool_check.txt", llm.calls[1][1])
+        self.assertIn("工具检查通过", llm.calls[1][1])
 
     def test_bare_input_then_final(self):
         llm = FakeLLM(
             [
-                "Thought: 直接算。\nAction: calculate\nAction Input: 2+2",
-                "Thought: 完成了。\nFinal Answer: 4",
+                "Thought: 直接读。\nAction: read_file\nAction Input: demo/tool_check.txt",
+                "Thought: 完成了。\nFinal Answer: 已读取。",
             ]
         )
         agent = ReActAgent(llm, max_steps=4, verbose=False, use_color=False)
-        self.assertEqual(agent.run("2+2"), "4")
-        self.assertIn("Observation: 2+2 = 4", llm.calls[1][1])
+        self.assertEqual(agent.run("读取 demo/tool_check.txt"), "已读取。")
+        self.assertIn("Observation: 文件：demo/tool_check.txt", llm.calls[1][1])
 
     def test_invalid_output_is_fed_back(self):
         llm = FakeLLM(

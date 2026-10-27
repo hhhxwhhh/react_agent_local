@@ -1,7 +1,10 @@
-"""本地工具集：天气、联网搜索、网页正文抓取、计算器。
+"""本地工具集：注册给 Agent 的核心工具，以及内部工具实现。
 
 每个工具都是普通 Python 函数，接收参数并返回一段给模型阅读的文本。
 除搜索/天气需要联网外，不依赖任何第三方服务或 API Key。
+
+`TOOL_SPECS` / `TOOL_FUNCS` 定义模型可见的动作空间，刻意保持精简；未注册的
+函数仅供内部测试、CLI 记忆面板和安全边界检查使用，不能通过 `run_tool` 调用。
 """
 
 from __future__ import annotations
@@ -2719,22 +2722,11 @@ def get_exchange_rate(base: str, target: str, amount: float = 1.0) -> str:
 # 工具注册表
 # ---------------------------------------------------------------------------
 
+# Agent 的动作空间只保留核心工具。未注册的函数仍作为内部库函数保留，
+# 供测试和安全边界检查使用，但不会出现在提示词里，也不能通过 run_tool 调用。
 TOOL_SPECS: dict[str, dict] = {
     "get_weather": {
         "description": "查询指定城市的实时天气和未来 3 天预报。数据来源 Open-Meteo，无需 API Key。",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "city": {
-                    "type": "string",
-                    "description": "城市名称，例如：北京、上海、杭州、Tokyo",
-                }
-            },
-            "required": ["city"],
-        },
-    },
-    "get_air_quality": {
-        "description": "查询城市实时空气质量：US AQI、PM2.5、PM10、臭氧、二氧化氮、二氧化硫、一氧化碳。数据来源 Open-Meteo，无需 Key。",
         "parameters": {
             "type": "object",
             "properties": {
@@ -2772,32 +2764,6 @@ TOOL_SPECS: dict[str, dict] = {
                 },
             },
             "required": ["url"],
-        },
-    },
-    "calculate": {
-        "description": "计算数学表达式，支持 + - * / // % **、括号，以及 sqrt、sin、cos、log、abs、round、min、max 等函数。",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "expression": {
-                    "type": "string",
-                    "description": "数学表达式，例如：(12+8)*3 或 sqrt(2)",
-                }
-            },
-            "required": ["expression"],
-        },
-    },
-    "get_current_time": {
-        "description": "查询某个城市或 IANA 时区的当前日期、时间、星期和 UTC 偏移。支持北京、东京、纽约等常见城市。",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "location": {
-                    "type": "string",
-                    "description": "城市名（如 北京、Tokyo、New York）或 IANA 时区名（如 America/New_York）；默认 Asia/Shanghai",
-                }
-            },
-            "required": [],
         },
     },
     "get_location": {
@@ -2850,49 +2816,6 @@ TOOL_SPECS: dict[str, dict] = {
                 },
             },
             "required": ["operation"],
-        },
-    },
-    "date_calc": {
-        "description": "日期计算：计算两个日期相差多少天（diff）、日期加减天数（add）、查询星期/ISO 周/年内天数/闰年（info）。",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "operation": {
-                    "type": "string",
-                    "description": "diff（默认）、add 或 info",
-                },
-                "start_date": {
-                    "type": "string",
-                    "description": "起始日期，YYYY-MM-DD；也支持 today、tomorrow、昨天",
-                },
-                "end_date": {
-                    "type": "string",
-                    "description": "结束日期，operation=diff 时必填",
-                },
-                "days": {
-                    "type": "integer",
-                    "description": "要加减的天数，operation=add 时必填，可为负数",
-                },
-            },
-            "required": [],
-        },
-    },
-    "convert_units": {
-        "description": "在长度、质量、温度、面积、体积、速度单位之间换算，支持中英文单位名，如 公里/英里、摄氏度/华氏度、公斤/磅。",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "value": {"type": "number", "description": "要换算的数值"},
-                "from_unit": {
-                    "type": "string",
-                    "description": "原单位，例如 km、米、°F、摄氏度、lb",
-                },
-                "to_unit": {
-                    "type": "string",
-                    "description": "目标单位，例如 mi、公里、°C、kg",
-                },
-            },
-            "required": ["value", "from_unit", "to_unit"],
         },
     },
     "list_files": {
@@ -2977,32 +2900,6 @@ TOOL_SPECS: dict[str, dict] = {
             "required": ["keyword"],
         },
     },
-    "edit_file": {
-        "description": "精确替换文件中的一段文本。old_text 必须在文件中唯一，否则设置 replace_all=true。会先请求用户授权。适合修改代码、配置和文档。",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "文件路径，可为绝对路径",
-                },
-                "old_text": {
-                    "type": "string",
-                    "description": "要替换的原文；应包含足够上下文以保证唯一",
-                },
-                "new_text": {
-                    "type": "string",
-                    "description": "替换后的文本；删除内容时传空字符串",
-                },
-                "replace_all": {
-                    "type": "boolean",
-                    "description": "true 表示替换全部匹配，默认 false",
-                },
-            },
-            "required": ["path", "old_text", "new_text"],
-        },
-        "context": True,
-    },
     "run_command": {
         "description": "在本机 shell 中执行命令或代码，例如 python script.py、python -c \"...\"、node app.js、git status、dir。cwd 可为绝对路径；相对路径以项目根目录为基准。会先请求用户授权，超时后终止进程树。",
         "parameters": {
@@ -3055,37 +2952,6 @@ TOOL_SPECS: dict[str, dict] = {
                 }
             },
             "required": ["patches"],
-        },
-        "context": True,
-    },
-    "move_file": {
-        "description": "移动或重命名文件/目录，自动创建目标父目录。会先请求用户授权；默认不覆盖已存在的目标。",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "source": {"type": "string", "description": "源文件或目录路径"},
-                "destination": {"type": "string", "description": "目标路径"},
-                "overwrite": {
-                    "type": "boolean",
-                    "description": "目标文件已存在时是否覆盖，默认 false",
-                },
-            },
-            "required": ["source", "destination"],
-        },
-        "context": True,
-    },
-    "delete_file": {
-        "description": "删除文件或目录。目录默认必须为空；recursive=true 才递归删除。会先请求用户授权，.git、data、.env 等受保护路径不可删除。",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "path": {"type": "string", "description": "要删除的文件或目录路径"},
-                "recursive": {
-                    "type": "boolean",
-                    "description": "删除非空目录时设为 true，默认 false",
-                },
-            },
-            "required": ["path"],
         },
         "context": True,
     },
@@ -3183,91 +3049,48 @@ TOOL_SPECS: dict[str, dict] = {
         },
         "context": True,
     },
-    "search_memory": {
-        "description": "按相似度检索长期记忆（本地向量索引 + 关键词混合）。当记忆条目很多、recall 列不全，或不确定记忆使用的 key 时使用；返回最相关的若干条及相关度。",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "自然语言检索词，例如“用户平时喝什么茶”“上次讨论的项目结论”",
-                },
-                "scope": {
-                    "type": "string",
-                    "description": "session（本对话）、global（跨对话）、all（两者都查）；省略时使用当前默认范围",
-                },
-                "limit": {
-                    "type": "integer",
-                    "description": "返回条数，1-10，默认 5",
-                },
-            },
-            "required": ["query"],
-        },
-        "context": True,
-    },
-    "forget": {
-        "description": "删除一条长期记忆。只在用户明确要求“忘记/删除/别再记住”时调用；不要未经确认批量删除。",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "key": {
-                    "type": "string",
-                    "description": "要删除的记忆键",
-                },
-                "scope": {
-                    "type": "string",
-                    "description": "session（本对话；Web 默认）或 global（跨对话；CLI 默认）",
-                },
-            },
-            "required": ["key"],
-        },
-        "context": True,
-    },
-    "get_exchange_rate": {
-        "description": "查询实时汇率并换算金额。使用 ISO 4217 三位货币代码，如 CNY、USD、EUR、JPY。数据来源 open.er-api.com，无需 Key。",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "base": {"type": "string", "description": "原货币代码，例如 CNY"},
-                "target": {"type": "string", "description": "目标货币代码，例如 USD"},
-                "amount": {
-                    "type": "number",
-                    "description": "要换算的金额，默认 1",
-                },
-            },
-            "required": ["base", "target"],
-        },
-    },
 }
 
 TOOL_FUNCS: dict[str, Callable[..., str]] = {
     "get_weather": get_weather,
-    "get_air_quality": get_air_quality,
     "web_search": web_search,
     "fetch_url": fetch_url,
-    "calculate": calculate,
-    "get_current_time": get_current_time,
     "get_location": get_location,
     "geo_lookup": geo_lookup,
-    "date_calc": date_calc,
-    "convert_units": convert_units,
     "list_files": list_files,
     "read_file": read_file,
     "write_file": write_file,
     "search_files": search_files,
-    "edit_file": edit_file,
     "apply_patch": apply_patch,
-    "move_file": move_file,
-    "delete_file": delete_file,
     "run_tests": run_tests,
     "git": git,
     "run_command": run_command,
     "remember": remember,
     "recall": recall,
-    "search_memory": search_memory,
-    "forget": forget,
-    "get_exchange_rate": get_exchange_rate,
 }
+
+# 这些函数保留实现，但刻意不注册给模型：它们要么是通用小工具，要么已被
+# apply_patch / 自动记忆重排 / CLI 与 Web 面板替代。新增注册前先确认必要性。
+INTERNAL_ONLY_TOOLS = frozenset(
+    {
+        "get_air_quality",
+        "calculate",
+        "get_current_time",
+        "date_calc",
+        "convert_units",
+        "get_exchange_rate",
+        "edit_file",
+        "move_file",
+        "delete_file",
+        "search_memory",
+        "forget",
+    }
+)
+
+if INTERNAL_ONLY_TOOLS & set(TOOL_SPECS):
+    raise RuntimeError("内部工具不能出现在 Agent 的动作空间中")
+if INTERNAL_ONLY_TOOLS & set(TOOL_FUNCS):
+    raise RuntimeError("内部工具不能出现在 Agent 的工具分发表中")
 
 
 def describe_tools() -> str:

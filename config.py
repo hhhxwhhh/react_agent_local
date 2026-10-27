@@ -55,6 +55,11 @@ TOOL_PERMISSION_TIMEOUT = max(10, int(os.getenv("TOOL_PERMISSION_TIMEOUT", "120"
 COMMAND_TIMEOUT = max(5, int(os.getenv("COMMAND_TIMEOUT", "120")))
 COMMAND_MAX_OUTPUT_CHARS = max(1000, int(os.getenv("COMMAND_MAX_OUTPUT_CHARS", "12000")))
 
+# 自进化 Harness：单代改动预算、测试超时和 Agent 最大工具轮数。
+EVOLUTION_MAX_DIFF_LINES = max(10, int(os.getenv("EVOLUTION_MAX_DIFF_LINES", "600")))
+EVOLUTION_TEST_TIMEOUT = max(30, int(os.getenv("EVOLUTION_TEST_TIMEOUT", "300")))
+EVOLUTION_MAX_STEPS = max(5, int(os.getenv("EVOLUTION_MAX_STEPS", "40")))
+
 # 单轮 ReAct 上下文压缩：scratchpad 超过阈值后，把较早步骤摘要掉，只保留最近原文。
 CONTEXT_COMPACT_CHARS = max(800, int(os.getenv("CONTEXT_COMPACT_CHARS", "7000")))
 CONTEXT_KEEP_CHARS = max(300, int(os.getenv("CONTEXT_KEEP_CHARS", "2400")))

@@ -27,7 +27,7 @@ Agent = LLM 策略 + 工具（Action Space）+ 记忆 + 控制循环 + 停止条
 | 组成 | 本项目实现 |
 |---|---|
 | 策略 | DeepSeek `deepseek-chat`，固定参数，不做训练 |
-| 动作空间 | 26 个本地工具：天气、搜索、文件读写与精确编辑、命令执行、计算、记忆等 |
+| 动作空间 | 15 个本地工具：天气、搜索、位置/地理、文件读写与批量补丁、命令执行、测试、Git、记忆 |
 | 观测 | 工具返回的文本 `Observation` |
 | 记忆 | 会话记忆 + 全局记忆，JSON 键值存储，带 TTL、容量上限与并发保护；单轮轨迹与跨轮历史超长时摘要压缩 |
 | 控制循环 | 手写 ReAct：Thought → Action → Observation → … |
@@ -260,7 +260,7 @@ Action 4: Finish[keyboard function keys]
 - ALFWorld 有 134 个未见测试游戏，任务可能超过 50 个位置、专家策略超过 50 步；BUTLER 基线每类任务用 `10^5` 条专家轨迹训练；
 - WebShop 有 118 万商品、1.2 万条人工指令，测试集 500 条；IL 基线用 1,012 条人工轨迹，IL+RL 额外用 10,587 条训练指令。
 
-这对本项目是一个直接提醒：**工具越多，并不自动意味着 Agent 越强；动作空间本身就是实验变量。** 我们的 26 个工具适合做通用助手，但不适合直接和论文的 3 动作 HotpotQA 设置对比。要做论文对齐的实验，应该先限制动作空间，而不是把 26 个工具全打开。
+这对本项目是一个直接提醒：**工具越多，并不自动意味着 Agent 越强；动作空间本身就是实验变量。** 我们的 15 个工具适合做通用助手，但不适合直接和论文的 3 动作 HotpotQA 设置对比。要做论文对齐的实验，应该先限制动作空间，而不是把 15 个工具全打开。
 
 #### 1.3.5 关键数字：ReAct 不是全面碾压
 
@@ -429,14 +429,14 @@ Action 4: Finish[keyboard function keys]
 | 维度 | 论文 ReAct | 本项目 | 差异带来的后果 | 可做的实验 |
 |---|---|---|---|---|
 | 策略 | Frozen PaLM-540B / GPT-3，few-shot prompting | DeepSeek Chat，zero-shot system prompt | 示例数、格式遵循、模型先验都不同，不是逐字复现 | 加 2–3 条轨迹示例，比较格式错误率和成功率 |
-| 动作空间 | `search` / `lookup` / `finish` 或环境动作 | 26 个异构工具 + `Final Answer` 分支 | 工具选择组合爆炸；与论文数字不可直接比 | 限制为 `search/fetch/finish` 做论文对齐实验 |
+| 动作空间 | `search` / `lookup` / `finish` 或环境动作 | 15 个异构工具 + `Final Answer` 分支 | 工具选择组合爆炸；与论文数字不可直接比 | 限制为 `search/fetch/finish` 做论文对齐实验 |
 | Thought 密度 | 知识任务稠密；决策任务稀疏、异步 | 每步强制一个 Thought | 简单任务过度思考；长程任务可能上下文膨胀 | 稠密 / 稀疏 / 失败触发三种策略对照 |
 | 终止 | `finish[answer]` 是动作 | `Final Answer` 是解析分支 | 终止不受动作空间约束，无法统计 `finish` 选择 | 增加 `finish` 伪工具，统一动作语义 |
 | 观测 | 受控 Wikipedia API，噪声低 | 开放搜索、网页抓取，噪声高且不可信 | search error 和注入风险显著更高 | 可信/不可信观测对照；结构化隔离 |
 | 记忆 | 无跨 episode 记忆 | 会话记忆 + 全局记忆 | 引入论文没有的跨会话状态与污染问题 | 记忆命中、泄漏、 stale memory 实验 |
 | 学习 | 主实验不训练；附录做 3,000 条轨迹微调 | 完全冻结 API | 不能声称“训练了 Agent” | 用成功轨迹做 SFT / Reflexion 式反思 |
 | 人类干预 | Thought editing，可改推理后继续 | 只展示 trace，不可编辑 | 可解释性只是“可看”，不是“可干预” | 增加 trace 编辑与分支重放 |
-| 评测 | EM / Acc / SR + 人工失败分类 | 138 个单元测试 + 真实用例 | 工程正确性 ≠ 任务能力 | 建立任务集、baseline、统计检验 |
+| 评测 | EM / Acc / SR + 人工失败分类 | 148 个单元测试 + 真实用例 | 工程正确性 ≠ 任务能力 | 建立任务集、baseline、统计检验 |
 | 安全 | 限制网站和动作，规避风险 | 逐跳 SSRF 校验/文件与命令逐次授权/外部内容边界，但开放网页与本机执行 | 攻击面更大，仍非生产级隔离 | 注入、SSRF、越权文件访问、高危命令红队测试 |
 
 一句话总结这张表：
@@ -653,7 +653,7 @@ sequenceDiagram
 | [agent.py](agent.py) | ReAct 循环、解析、上下文压缩、CLI | `parse_output`、`parse_action_input`、`_compact_scratchpad`、`_prepare_history`、`run` |
 | [prompts.py](prompts.py) | 系统提示词与强制收口提示 | 工具清单、记忆规则、输出格式 |
 | [llm.py](llm.py) | DeepSeek 客户端 | 重试、超时、错误映射 |
-| [tools.py](tools.py) | 26 个工具 + 注册表 | schema、参数校验、错误转 Observation |
+| [tools.py](tools.py) | 15 个工具 + 注册表 | schema、参数校验、错误转 Observation |
 | [memory.py](memory.py) | 全局/会话记忆后端 | JSON、原子写、语义检索、相关性重排、格式化注入 |
 | [vector_memory.py](vector_memory.py) | 本地向量索引 | 特征哈希 embedding、SQLite 持久化、混合检索 |
 | [sessions.py](sessions.py) | 会话持久化 | 消息、标题、历史摘要、会话记忆、锁 |
@@ -806,13 +806,13 @@ Final Answer: 北京现在天气为阴，气温 9.9°C...
 
 论文的 prompt 是**人类写的完整轨迹**：HotpotQA 6 条、FEVER 3 条、ALFWorld 每类 3 条。每条轨迹里既有 Thought，也有 Action 和 Observation，模型是“照着示例模仿格式与推理方式”。
 
-本项目是**zero-shot 工具 schema**：系统提示词列出 26 个工具及参数，要求模型按格式输出，但没有给完整的成功轨迹示例。两者不是同一种提示条件：
+本项目是**zero-shot 工具 schema**：系统提示词列出 15 个工具及参数，要求模型按格式输出，但没有给完整的成功轨迹示例。两者不是同一种提示条件：
 
 | 条件 | 论文 | 本项目 |
 |---|---|---|
 | 示例数量 | 1–6 条完整轨迹（按任务） | 0 条完整轨迹 |
 | 格式学习 | 从示例中归纳 | 从规则描述中理解 |
-| 工具数量 | 3 个左右 | 26 个 |
+| 工具数量 | 3 个左右 | 15 个 |
 | 参数格式 | `Search[entity]` 这类简单文本 | 单行 JSON |
 | 失败模式 | 主要担心推理/检索 | 还要担心 JSON、工具名、参数类型 |
 
@@ -895,43 +895,35 @@ TOOL_FUNCS[name] = callable
 5. 捕获所有异常，转成 `ERROR: ...` 文本；
 6. 把过长的 Observation 截断到 3000 字符。
 
-### 4.2 26 个工具
+### 4.2 15 个工具
 
 | 类别 | 工具 | 作用 |
 |---|---|---|
 | 外部信息 | `get_weather` | 实时天气 + 3 天预报 |
-| 外部信息 | `get_air_quality` | AQI、PM2.5、PM10 等 |
 | 外部信息 | `web_search` | 必应中文搜索 |
 | 外部信息 | `fetch_url` | 抓取网页正文 |
-| 外部信息 | `get_exchange_rate` | 汇率换算 |
 | 外部信息 | `get_location` | 调用时请求用户授权：允许则返回 GPS（含精度/反向地理编码），拒绝/超时回退公网 IP 城市级位置 |
 | 地理 | `geo_lookup` | 坐标↔地名互转（`reverse`/`forward`）、两点直线距离/方位角/中点（`distance`，纯本地计算） |
-| 计算 | `calculate` | AST 安全数学求值 |
-| 时间 | `get_current_time` | 城市/IANA 时区当前时间 |
-| 日期 | `date_calc` | 日期差、加减、周数 |
-| 单位 | `convert_units` | 长度、质量、温度、面积、体积、速度 |
 | 文件 | `list_files` | 列出本机目录（默认项目根目录） |
 | 文件 | `read_file` | 读取本机文本文件（最大 5 MB） |
 | 文件 | `write_file` | 写入/追加文本文件；需用户授权 |
-| 文件 | `edit_file` | 按唯一 `old_text` 精确替换；需用户授权 |
-| 文件 | `apply_patch` | 原子批量修改多个文件；需用户授权 |
-| 文件 | `move_file` | 移动/重命名文件或目录；需用户授权 |
-| 文件 | `delete_file` | 删除文件/目录；`.git`、`data`、`.env` 受保护；需用户授权 |
+| 文件 | `apply_patch` | 按唯一 `old_text` 原子修改一个或多个文件；需用户授权 |
 | 文件 | `search_files` | 文件名/内容搜索；跳过 `.git`、`node_modules` 等 |
 | 自进化 | `run_tests` | 运行 unittest 并返回退出码、耗时和输出；需用户授权 |
 | 自进化 | `git` | status/diff/log/show 只读；add/commit/restore/branch/tag/checkout 需授权 |
 | 命令 | `run_command` | 执行 shell 命令/脚本，支持超时与进程树终止；需用户授权 |
 | 记忆 | `remember` | 写入会话/全局记忆，可设 `ttl_days` |
-| 记忆 | `recall` | 按精确 key 读取记忆 |
-| 记忆 | `search_memory` | 语义/关键词混合检索，`scope=all` 跨会话 |
-| 记忆 | `forget` | 删除一条记忆（需用户明确要求） |
+| 记忆 | `recall` | 按精确 key 读取记忆；不传 key 时列出当前范围 |
 
-`forget` 在 v2 中已注册给模型；CLI 的 `:forget` 和 Web 记忆面板仍可直接删除。
+动作空间刻意保持精简：工具越多，提示词越长、工具选择越难，安全面也越大。
+以下函数仍保留在 `tools.py` 中，供内部测试、CLI 记忆面板和安全边界检查使用，
+但**不注册给模型**，也不能通过 `run_tool` 调用：`get_air_quality`、`calculate`、
+`get_current_time`、`date_calc`、`convert_units`、`get_exchange_rate`、
+`edit_file`、`move_file`、`delete_file`、`search_memory`、`forget`。
+
 `remember` 的 `ttl_days` 用于临时约定，过期条目不会注入提示词，并会在下次写入时清理。
-
-`search_memory` 与 `recall` 的分工值得在组会上讲清楚：**`recall` 是精确查 key，
-`search_memory` 是自然语言找相关条目**。前者确定性高、成本低；后者能处理“我不记得
-当时用的是什么 key”，但返回的是排序结果，必须回到记忆原文校验。
+记忆的语义检索仍发生在内部：`format_memory_context` 在条目较多时按向量相似度和
+字面重合重排；Agent 只需要 `recall` 精确读取，不必自己选择检索算法。
 
 `get_location` 把“定位来源”和“授权时机”都做成了显式契约，而不是让模型猜：
 
@@ -1015,9 +1007,9 @@ TOOL_FUNCS[name] = callable
 
 ### 4.3.1 自进化工具闭环
 
-面向“Agent 修改自己的源码”新增了五个工具：`apply_patch`（原子多文件修改）、
-`move_file` / `delete_file`（重构与清理）、`run_tests`（固定测试入口）、`git`
-（快照、对比、提交与回滚）。推荐闭环是：
+面向“Agent 修改自己的源码”保留了三个工具：`apply_patch`（原子多文件修改）、
+`run_tests`（固定测试入口）、`git`（快照、对比、提交与回滚）。`move_file` /
+`delete_file` 仍有内部实现，但为缩小动作空间不再暴露给模型。推荐闭环是：
 
 ```text
 git status / git diff
@@ -1030,6 +1022,32 @@ git status / git diff
 需要强调：**这些工具让“自我修改”可操作，但不自动等于“进化”**。真正的选择信号
 来自测试和任务评测；如果 Agent 能改测试，它就会优化分数而不是能力。因此 `tests/`
 和评测器应被视为不可进化的“免疫系统”，提示词也明确禁止修改测试来伪造通过。
+
+### 4.3.2 自进化 Harness：可进化的 Agent + 不可进化的裁判
+
+工具层之上新增了 `evolution.py`（裁判/调度器）和 `harness.py`（可进化的元策略）。
+每代流程是：
+
+```text
+干净工作区 + 基线测试/安全检查
+  → 当前版本 Agent 读取源码，提出最小改进并 apply_patch
+  → 冻结路径检查（tests/、evolution.py、config.py、.env 等）
+  → py_compile + 临时副本安全探针 + 完整测试 + 可选评分
+  → 接受：提交并打 evo-gen-N；拒绝：保存 diff 并 git reset --hard
+  → 下一代由新进程启动，加载刚提交的新代码
+```
+
+关键设计是**裁判不可进化**：Agent 可以修改 `agent.py`、`tools.py`、`prompts.py`，
+甚至 `harness.py` 里的目标选择和提示词；但 `tests/`、`evolution.py`、`config.py`
+以及密钥路径是冻结的。这样“下一代自己开发自己”不会退化成“下一代改测试让自己通过”。
+
+安全检查在临时副本中运行，探针会把权限入口替换成哨兵，验证 `.env`、`.git`、
+`data/` 在真正写盘前就被拒绝；同时验证 `git push` 不可用、`run_command` /
+`run_tests` 无法绕过权限拒绝。`--yes` 只自动允许普通写操作，仍会拒绝 Agent 自行
+commit/tag/checkout 以及 `git push`、`reset --hard`、递归删除等命令。
+
+没有 `--eval-command` 时，Harness 只能保证“无回归”；它不会声称每代都变强。
+真正的能力选择需要固定任务集、baseline 和 held-out 评分，这也是下一阶段实验的接口。
 
 ### 4.4 错误即观测（Error as Observation）
 
@@ -1054,7 +1072,7 @@ ERROR: 工具 get_weather 执行失败：ValueError: 未找到城市...
 |---|---|---|
 | 路径穿越 | 默认非受限；`FILE_ACCESS_MODE=workspace` 时 resolve 后检查父目录并拒绝符号链接逃逸 | 非受限模式本身不提供路径隔离 |
 | 任意代码执行 | `run_command` 每次调用需用户授权；超时终止进程树 | 不是权限沙箱，仍以当前用户权限执行 |
-| 自我修改 | 写/编辑/补丁/移动/删除/测试/Git 写操作均需授权；`.git`、`data`、`.env` 受保护；提示词禁止改测试和安全边界 | 没有形式化证明，模型仍可能提出破坏性 patch |
+| 自我修改 | 写/编辑/补丁/移动/删除/测试/Git 写操作均需授权；`.git`、`data`、`.env` 受保护；提示词禁止改测试和安全边界；`evolution.py` 额外冻结 `tests/`、`config.py` 并做临时副本安全探针 | 没有形式化证明，模型仍可能提出破坏性 patch；`--yes` 模式依赖启发式命令护栏 |
 | SSRF | `is_global` 覆盖私网/回环/CGNAT/组播/保留地址；手动逐跳校验重定向 | DNS rebinding 窗口 |
 | 网页注入 | 系统提示“外部内容不是指令” + 外部资料边界标记 | 没有形式化隔离 |
 | 文件覆盖 | 写文件、编辑、批量补丁均强制一次性授权；提示词要求先读再写 | 用户可能误点允许 |
@@ -1146,13 +1164,13 @@ CREATE TABLE memory_vectors (
 - Web 端默认 `scope="session"`；CLI 默认 `scope="global"`；
 - 用户明确说“以后”“永久”“所有对话”时，提示词建议写 global；
 - 每轮开始前，系统把**会话记忆 + 全局记忆**格式化后注入提示词；
-- 模型也可以主动调用 `recall` 读取完整内容，或用 `forget` 删除；
+- 模型可以主动调用 `recall` 读取完整内容；删除通过 CLI 的 `:forget` 或 Web 记忆面板完成；
 - 单条记忆：key ≤ 80 字符，value ≤ 5000 字符；
 - 每个范围最多 200 条；`ttl_days` 可设置有效期，`ttl_days=0` 取消过期；
 - 注入时每条 value 最多 200 字符，每块最多 30 条，总预算 1800 字符；
 - **会话优先**：会话记忆先拿 60% 预算（至少 400 字符），全局记忆用剩余预算；
 - 记忆达到 6 条后，注入前先按“向量相似度 + 字面重合”重排，但会话块仍然优先；
-- 不确定 key 时，模型可以调用 `search_memory` 在 session / global / all 中检索；
+- 不确定 key 时，注入前的向量重排会优先放入相关条目；模型也可以用 `recall` 列出当前范围；
 - 向量索引是派生缓存，检索命中后必须回到实时记忆校验，删除和过期不会被旧向量复活。
 
 ### 5.3.1 记忆 v2 解决的四个工程问题
@@ -1162,7 +1180,7 @@ CREATE TABLE memory_vectors (
 | 并发丢写 | 每个 `JsonMemory` 实例各自持锁，16 线程写 320 条只剩 20 条 | `lock_for(path)` 进程级共享可重入锁，读-改-写在锁内完成 |
 | 临时文件冲突 | 固定 `memory.json.tmp`，并发写互相覆盖/`PermissionError` | `mkstemp` 生成唯一临时文件，`fsync` 后 `os.replace` 原子替换 |
 | 会话记忆被挤掉 | 先拼全局再整体截断，全局一多会话块直接消失 | 会话优先分配预算，块内按更新时间倒序、按条裁剪 |
-| 只记不删 | 有 `forget_memory` 但没注册给模型，也没有容量/TTL | 注册 `forget` 工具；200 条上限；`ttl_days` + 过期自动清理 |
+| 只记不删 | 有 `forget_memory` 但没注册给模型，也没有容量/TTL | 提供 `forget` 函数与 CLI/Web 删除入口；200 条上限；`ttl_days` + 过期自动清理 |
 
 ### 5.3.2 为什么“读-改-写”必须原子
 
@@ -1183,7 +1201,7 @@ CREATE TABLE memory_vectors (
 记忆是**过去**，工具观测是**现在**。提示词新增两条硬规则：
 
 1. 记忆与最新 Observation 冲突时，以更新、更具体的观测为准；
-2. 只有用户明确说“忘记/删除/别再记住”时才调用 `forget`。
+2. 只有用户明确说“忘记/删除/别再记住”时，才通过 CLI 或 Web 面板删除。
 
 这不能从机制上证明模型一定遵守，但把“记忆可能陈旧”从隐含假设变成了显式约束。
 真正的冲突消解（时间戳比较、来源可信度、自动失效）仍是开放问题。
@@ -1234,7 +1252,7 @@ memory.json / session.json（事实来源）
 data/vector_memory.db（SQLite，派生缓存）
         │  search：cosine + lexical
         ▼
-search_memory 工具 / 提示词注入前重排
+search_memory_entry / 提示词注入前重排
 ```
 
 #### 1. 为什么不用神经 embedding
@@ -1307,8 +1325,8 @@ score(q, m) = α · max(0, cos(q, m)) + (1 - α) · overlap(q, m)
 - **同分时保留新近性**：排序键是 `(score, -index)`，分数相同则更新时间更晚的在前。
 
 这让“同样 1800 字符预算”从“最近写了什么”变成“最近写了什么 + 和当前问题有多相关”。
-但重排只是启发式，不能保证把唯一关键记忆放进预算；这也是为什么还要保留
-`search_memory` 作为显式兜底。
+但重排只是启发式，不能保证把唯一关键记忆放进预算；因此内部仍保留
+`search_memory_entry` 供测试和维护使用，Agent 侧则依靠注入重排 + `recall`。
 
 #### 6. 成本与规模
 
@@ -1367,21 +1385,22 @@ Agent：不知道。本会话中没有任何关于项目代号的记忆或对话
 
 这说明会话隔离生效：**A 的记忆没有泄漏到 B**。
 
-再做一个“不知道 key”的检索实验：
+再做一个“不知道 key”的检索实验（这是工具精简前暴露 `search_memory` 的轨迹；
+现在同样能力由注入前重排承担）：
 
 ```text
 （会话 A 中曾 remember key="饮料偏好", value="用户喜欢龙井茶"）
 用户：我平时喝什么茶？
-Agent：Thought: 摘要里没有直接答案，key 也不确定，先检索记忆。
-Action: search_memory
-Action Input: {"query": "用户平时喝什么茶", "scope": "session"}
-Observation: 语义检索命中 1 条：饮料偏好（相关度 0.38）：用户喜欢龙井茶
+Agent：Thought: 注入的记忆摘要里没有直接答案，key 也不确定，先列出当前记忆。
+Action: recall
+Action Input: {"scope": "session"}
+Observation: 本会话记忆：饮料偏好 = 用户喜欢龙井茶
 Agent：你平时喜欢喝龙井茶。
 ```
 
-对照组：只给 `recall` 时，模型要么列出全部记忆碰运气，要么因为不知道 key 而放弃。
-这就是向量索引带来的直接行为差异。但相关度 0.38 也提醒我们：**排序分数不可解释为
-事实置信度**，它只是检索启发式。
+对照组：完全没有记忆注入或 `recall` 时，模型只能靠猜或直接放弃。
+这就是记忆分层与向量重排带来的直接行为差异。相关度只用于排序，**不能解释为
+事实置信度**；它只是检索启发式。
 
 ### 5.5 记忆 vs RAG vs 微调
 
@@ -1509,14 +1528,15 @@ Agent：你平时喜欢喝龙井茶。
 python -m unittest discover -s tests -v
 ```
 
-当前 **138 个测试**（1 个符号链接用例在无权限的 Windows 环境跳过），覆盖：
+当前 **148 个测试**（1 个符号链接用例在无权限的 Windows 环境跳过），覆盖：
 
 - ReAct 解析：Final/Action/全角冒号/代码围栏/裸参数/Thought 内出现 `Final Answer:`；
 - ReAct 循环：Action→Final、格式错误修正、重复动作拦截、连续格式错误收口、取消检查、强制收口；
 - 用量：多轮 LLM 调用的 `usage` 累计；
-- 工具：计算器、单位、日期、时间、本机文件读写与编辑、命令执行、记忆；
+- 工具：天气、搜索、网页抓取、位置/地理、本机文件、命令执行、测试、Git、记忆；内部仍测试计算器、时间、单位等未注册函数；
 - 工具安全：US/EU AQI 分级、私网/回环/链路本地地址拦截、重定向逐跳校验、响应体上限、外部内容边界标记、写文件/命令授权允许与拒绝；
-- 文件与命令：工作区模式逃逸拦截、非受限模式外部路径读写、`edit_file` 唯一匹配校验、命令执行与超时；
+- 自进化裁判：冻结路径检查、diff 行数预算、测试/评分解析、临时副本安全探针、代号递增；
+- 文件与命令：工作区模式逃逸拦截、非受限模式外部路径读写、内部文件函数的唯一匹配校验、命令执行与超时；
 - 记忆：并发写不丢失、TTL/过期清理、200 条容量、会话优先预算、旧文件迁移；
 - 向量记忆：embedding 确定性与归一化、相关文本得分更高、SQLite 增量同步与删除、
   会话/全局命名空间隔离、跨实例持久化、删除后不复活、向量关闭/索引故障时的关键词兜底、
@@ -1628,7 +1648,7 @@ python -m unittest discover -s tests -v
 
 ### 7.5 论文对齐实验的最小清单
 
-如果组会追问“你和 ReAct 论文的数字怎么比”，不要拿 138 个单元测试去对 Table 1。正确做法是先声明**不可比**，再给出一个可执行的缩小版复现。
+如果组会追问“你和 ReAct 论文的数字怎么比”，不要拿 148 个单元测试去对 Table 1。正确做法是先声明**不可比**，再给出一个可执行的缩小版复现。
 
 **第一步：限制动作空间**
 
@@ -1681,7 +1701,7 @@ python -m unittest discover -s tests -v
 | 已修复 | [memory.py](memory.py) 会话记忆被全局记忆截断 | v1 10 条全局×220 字 → 1810 字，会话块消失 | 会话优先预算；已加回归测试 |
 | 已修复 | [tools.py](tools.py) SSRF 防护有缺口 | v1 100.64.0.1、224.0.0.1 被放行，且 `allow_redirects=True` 先访问再检查 | 改用 `is_global` 全覆盖判断 + 手动逐跳校验 + 2 MB 响应上限 + Content-Type 白名单 |
 | P2 | [tools.py](tools.py) DNS rebinding 窗口 | 校验用 `getaddrinfo`，实际连接时 `requests` 会再次解析，理论上可被换 IP | 连接层 IP 钉扎、自建 `HTTPAdapter`、或强制代理 |
-| 已修复 | [tools.py](tools.py) 模型不能“忘记” | v1 `forget_memory` 未注册进工具表 | 已注册 `forget(key, scope)` |
+| 已修复 | [tools.py](tools.py) 模型不能“忘记” | v1 `forget_memory` 未注册进工具表 | 提供 `forget` 函数与 CLI/Web 删除入口；工具精简后不再暴露给模型 |
 | 已修复 | [memory.py](memory.py) 全局记忆在 workspace 内 | v1 文件工具可读写 `memory.json` | 已移至 `data/memory.json`，旧文件自动迁移 |
 | P2 | [storage.py](storage.py) 跨进程写不协调 | 锁只在当前 Python 进程内；CLI 与 Web 同时写仍可能后写覆盖 | 文件锁/单进程约束/数据库 |
 | P2 | [tools.py](tools.py) 搜索质量不稳定 | “ReAct 论文 核心思想”返回 React 前端 | 查询改写/相关性过滤 |
@@ -1836,11 +1856,11 @@ python -m unittest discover -s tests -v
 
 **1:40–3:00 实现**
 
-> 系统有 26 个工具、分层记忆、上下文摘要和会话管理。手写循环保证每一步可检查；工具错误会作为 Observation 返回，让模型自我修正；Web 端用 SSE 把 Thought、Action、Observation 实时推给前端。和论文的差别也要讲清楚：论文是 few-shot 轨迹、3 个左右的受控动作；我是 zero-shot schema、26 个开放工具，所以这不是逐字复现。
+> 系统有 15 个工具、分层记忆、上下文摘要和会话管理。手写循环保证每一步可检查；工具错误会作为 Observation 返回，让模型自我修正；Web 端用 SSE 把 Thought、Action、Observation 实时推给前端。和论文的差别也要讲清楚：论文是 few-shot 轨迹、3 个左右的受控动作；我是 zero-shot schema、15 个开放工具，所以这不是逐字复现。
 
 **3:00–4:00 证据**
 
-> 论文的数字不是“ReAct 全面碾压”：HotpotQA 上 ReAct 27.4 低于 CoT 29.4，FEVER 上 60.9 高于 56.3；ALFWorld 最好 71% 对 BUTLER 37%；WebShop 40% 对 IL+RL 28.7%。真正稳定的是“ReAct + CoT-SC 组合最好”，以及 grounding 带来的可解释性。我的项目做了 138 个离线测试、26 个工具联网检查和真实模型端到端测试。会话记忆能隔离，同会话并发返回 409，跨会话并发有全局上限，停止能在下一个检查点取消，API Key 失效时不会挂起。我也压测出了几个边界问题并修掉了：并发写全局记忆丢数据、AQI 标签混用、重复动作、SSRF 重定向绕过和 token 统计不完整。
+> 论文的数字不是“ReAct 全面碾压”：HotpotQA 上 ReAct 27.4 低于 CoT 29.4，FEVER 上 60.9 高于 56.3；ALFWorld 最好 71% 对 BUTLER 37%；WebShop 40% 对 IL+RL 28.7%。真正稳定的是“ReAct + CoT-SC 组合最好”，以及 grounding 带来的可解释性。我的项目做了 148 个离线测试、15 个工具联网检查和真实模型端到端测试。会话记忆能隔离，同会话并发返回 409，跨会话并发有全局上限，停止能在下一个检查点取消，API Key 失效时不会挂起。我也压测出了几个边界问题并修掉了：并发写全局记忆丢数据、AQI 标签混用、重复动作、SSRF 重定向绕过和 token 统计不完整。
 
 **4:00–4:40 局限**
 
@@ -1862,7 +1882,7 @@ python -m unittest discover -s tests -v
 | 6 | ReAct 循环与解析 | 格式错了怎么办？ |
 | 7 | 工具与安全 + 观测信任边界 | SSRF/注入怎么防？ |
 | 8 | 记忆分层 | 会话/全局边界？和 RAG 区别？ |
-| 9 | 我的评测与论文对照 | 138 个测试够吗？baseline？ |
+| 9 | 我的评测与论文对照 | 148 个测试够吗？baseline？ |
 | 10 | 局限与下一步 | 创新点是什么？ |
 
 ### 10.3 白板画法
@@ -1922,7 +1942,7 @@ Stop = Final Answer or max_steps
 | 2 MB | `fetch_url` 响应体读取上限 |
 | 4 | `fetch_url` 最大重定向跳数 |
 | 12 / 5000 | 历史最多消息数 / 总字符 |
-| 138 | 当前测试数（1 个符号链接用例在无权限 Windows 跳过） |
+| 148 | 当前测试数（1 个符号链接用例在无权限 Windows 跳过） |
 | 512 | 本地向量维度（`VECTOR_DIM`） |
 | 0.7 | 混合检索中余弦权重（`VECTOR_HYBRID_ALPHA`） |
 | 200 | 每个记忆范围的最大条数，也是暴力检索的规模上界 |
@@ -1946,7 +1966,7 @@ Stop = Final Answer or max_steps
 
 **追问：那它算真正的 Agent 吗？**
 
-> 算一个受限的 Agent。它有动作空间、观测、记忆和停止条件，但动作空间是人工定义的 26 个工具，控制循环也是固定的。它没有开放环境里的自主探索，也没有学习。
+> 算一个受限的 Agent。它有动作空间、观测、记忆和停止条件，但动作空间是人工定义的 15 个工具，控制循环也是固定的。它没有开放环境里的自主探索，也没有学习。
 
 #### Q2. ReAct 的核心思想是什么？为什么 Thought 和 Action 要交错？
 
@@ -2002,7 +2022,7 @@ Stop = Final Answer or max_steps
 
 **30 秒回答：**
 
-> 分层：提示词里的短期上下文、会话 JSON 里的历史摘要与会话记忆、`data/memory.json` 里的全局记忆，以及 `data/vector_memory.db` 里的派生向量索引。会话记忆只属于当前会话，删除会话就删除；全局记忆跨会话共享。工具层通过 `ToolContext` 知道当前会话，默认 Web 写 session，CLI 写 global。记忆条目还带 `created_at`、`revision` 和可选 `expires_at`，写操作走共享锁 + 原子替换。上下文超过阈值时，单轮轨迹和跨轮历史都会转成“摘要 + 最近原文”，摘要失败还有抽取式回退；不知道 key 时用 `search_memory` 做混合检索，索引故障会自动退化为关键词。
+> 分层：提示词里的短期上下文、会话 JSON 里的历史摘要与会话记忆、`data/memory.json` 里的全局记忆，以及 `data/vector_memory.db` 里的派生向量索引。会话记忆只属于当前会话，删除会话就删除；全局记忆跨会话共享。工具层通过 `ToolContext` 知道当前会话，默认 Web 写 session，CLI 写 global。记忆条目还带 `created_at`、`revision` 和可选 `expires_at`，写操作走共享锁 + 原子替换。上下文超过阈值时，单轮轨迹和跨轮历史都会转成“摘要 + 最近原文”，摘要失败还有抽取式回退；不知道 key 时由注入前的向量重排优先放入相关条目，模型也可以用 `recall` 列出当前范围；索引故障会自动退化为关键词。
 
 **追问：怎么保证 A 会话的记忆不泄漏到 B？**
 
@@ -2039,11 +2059,11 @@ Stop = Final Answer or max_steps
 
 > 不宣称完备。v1 实测发现 100.64.0.0/10 和组播地址会被放行，而且 `requests.allow_redirects=True` 是请求发出后才检查最终 URL。v2 已改为 `is_global` + 手动逐跳校验 + 响应体上限。仍有一个理论窗口：校验时的 DNS 解析和 `requests` 实际连接时的解析不是同一次，存在 DNS rebinding 风险；要彻底解决需要 IP 钉扎或受控代理，我把它列为后续工作。
 
-#### Q10. 你怎么证明这个 Agent 有效？138 个测试够吗？
+#### Q10. 你怎么证明这个 Agent 有效？148 个测试够吗？
 
 **30 秒回答：**
 
-> 138 个测试证明的是**工程正确性**：解析、循环、工具、记忆索引、会话、API 在受控输入下按预期工作。它不证明开放任务上的效果。论文用的是 EM / Acc / SR 加人工失败分类；我要证明效果，也需要任务集、baseline、指标和消融：Direct、CoT、Act-only、ReAct、ReAct+memory，记忆层再分“精确 key / 关键词 / 向量 / 混合”，比较成功率、步数、时延、token、重复动作率、检索 recall@k 和错误恢复率，而不是拿单元测试去对论文表格。
+> 148 个测试证明的是**工程正确性**：解析、循环、工具、记忆索引、会话、API 在受控输入下按预期工作。它不证明开放任务上的效果。论文用的是 EM / Acc / SR 加人工失败分类；我要证明效果，也需要任务集、baseline、指标和消融：Direct、CoT、Act-only、ReAct、ReAct+memory，记忆层再分“精确 key / 关键词 / 向量 / 混合”，比较成功率、步数、时延、token、重复动作率、检索 recall@k 和错误恢复率，而不是拿单元测试去对论文表格。
 
 **追问：那你现在有量化结果吗？**
 
@@ -2053,7 +2073,7 @@ Stop = Final Answer or max_steps
 
 **30 秒回答：**
 
-> 如果只问算法，它确实不是新算法，核心是 ReAct 风格的工程实现。我的定位是**可控 testbed**：论文在受控动作空间里验证了推理与行动的互补；我把动作空间扩大到 26 个工具、观测换成开放网页、再加上跨会话记忆，研究这些变化下哪些结论仍成立。创新点不在“发明循环”，而在“可观测、可干预的实验平台 + 后续 empirical study”。
+> 如果只问算法，它确实不是新算法，核心是 ReAct 风格的工程实现。我的定位是**可控 testbed**：论文在受控动作空间里验证了推理与行动的互补；我把动作空间扩大到 15 个工具、观测换成开放网页、再加上跨会话记忆，研究这些变化下哪些结论仍成立。创新点不在“发明循环”，而在“可观测、可干预的实验平台 + 后续 empirical study”。
 
 **追问：那论文贡献够吗？**
 
@@ -2089,12 +2109,12 @@ Stop = Final Answer or max_steps
 | 为什么服务端没有鉴权？ | 默认只监听 127.0.0.1，定位本地个人使用。 |
 | 为什么现在有 shell 工具？ | 目标是成为可改代码、可运行测试的本地 Agent；`run_command` 以当前用户权限执行，因此每次调用前必须由用户确认，超时会终止进程树，但它不是安全沙箱。 |
 | 计算器为什么用 AST？ | 只允许白名单节点/函数，避免 `eval` 任意代码执行。 |
-| 文件工具怎么防越权？ | 默认非受限模式，允许本机任意路径；写/编辑/命令需一次性授权。设置 `FILE_ACCESS_MODE=workspace` 后，resolve 并检查 candidate 是否在 workspace 下，同时拒绝符号链接逃逸。 |
+| 文件工具怎么防越权？ | 默认非受限模式，允许本机任意路径；`write_file`、`apply_patch`、测试、Git 写操作和命令需一次性授权。设置 `FILE_ACCESS_MODE=workspace` 后，resolve 并检查 candidate 是否在 workspace 下，同时拒绝符号链接逃逸。 |
 | 为什么不用向量数据库？ | 每个范围 ≤ 200 条、512 维，SQLite 暴力点积已是毫秒级；独立向量库会增加依赖和近似召回误差。索引只是缓存，事实来源仍是 JSON。 |
 | 向量记忆是神经 embedding 吗？ | 不是。本地特征哈希（中文单字/二元/三元组 + 英文词），强在字面相似，弱在同义改写；这是零依赖折中，也是后续替换 embedding 的基线。 |
 | 位置工具能精确定位吗？ | 分类讨论：模型调用 `get_location` 时界面会弹授权卡片，用户点「允许一次」后浏览器 GPS 可给到米级；拒绝或超时只能按公网出口 IP 估算到城市级，代理/VPN 还会改变结果。返回文本会标注来源，模型不能把 IP 结果说成精确定位。 |
 | 坐标和地名怎么互转？ | 用 `geo_lookup`：`reverse` 坐标→地址，`forward` 地名→坐标，`distance` 本地算距离。它不触发定位授权，也不需要新 Key；反向首选 BigDataCloud、正向首选 Open-Meteo，失败都回退 Nominatim。 |
-| 模型能自己删除记忆吗？ | 能；v2 已注册 `forget(key, scope)`，但提示词只在用户明确要求时调用。 |
+| 模型能自己删除记忆吗？ | 不能通过工具删除；模型可 `remember` / `recall`，删除由用户在 CLI `:forget` 或 Web 记忆面板完成，避免模型误删。 |
 | 如何复现测试？ | `python -m unittest discover -s tests -v`。 |
 
 ### 11.3 压力问题 8 题
@@ -2147,7 +2167,7 @@ Stop = Final Answer or max_steps
 
 **追问：那你的项目有数字吗？**
 
-> 目前只有工程测试和真实用例，没有论文级的 benchmark。我不会拿 138 个单元测试去对 Table 1；下一步会做 3 组 × 60 题的配对实验。
+> 目前只有工程测试和真实用例，没有论文级的 benchmark。我不会拿 148 个单元测试去对 Table 1；下一步会做 3 组 × 60 题的配对实验。
 
 #### Q3. “论文用 few-shot，你是 zero-shot，这还算 ReAct 吗？”
 
@@ -2165,9 +2185,9 @@ Stop = Final Answer or max_steps
 
 > 可能，所以触发条件要设计好：多跳、工具选择不确定、上一步报错、观测与预期冲突时强制思考；确定性单工具调用可以跳过。这个假设本身就可以用实验检验。
 
-#### Q5. “论文动作空间只有 3 个，你有 26 个，是不是过度工程？”
+#### Q5. “论文动作空间只有 3 个，你有 15 个，是不是过度工程？”
 
-> 工程上是功能丰富，研究上是混淆变量。动作空间越大，工具选择越难，和论文的可比性越差。我的 26 个工具适合做通用助手和系统实验，但不适合直接对标论文数字。要做论文对齐实验，我会先限制成 `search/fetch/finish` 三个动作；要做工具选择研究，再把 26 个工具作为自变量。
+> 工程上是功能丰富，研究上是混淆变量。动作空间越大，工具选择越难，和论文的可比性越差。我的 15 个工具适合做通用助手和系统实验，但不适合直接对标论文数字。要做论文对齐实验，我会先限制成 `search/fetch/finish` 三个动作；要做工具选择研究，再把 15 个工具作为自变量。
 
 **追问：工具多一定更差吗？**
 
@@ -2355,7 +2375,7 @@ python -m unittest discover -s tests -v
 | 工具注册 | [tools.py](tools.py) 的 `TOOL_SPECS` / `TOOL_FUNCS` |
 | 工具执行与错误处理 | [tools.py](tools.py) 的 `run_tool` |
 | 记忆注入与重排 | [memory.py](memory.py) 的 `format_memory_context` / `_rerank_entries` |
-| 语义检索 | [memory.py](memory.py) 的 `search_memory_entry` + [tools.py](tools.py) 的 `search_memory` |
+| 语义检索 | [memory.py](memory.py) 的 `search_memory_entry` + 注入前重排 |
 | 向量索引 | [vector_memory.py](vector_memory.py) 的 `embed_text` / `VectorMemoryStore.search` |
 | 位置工具 | [tools.py](tools.py) 的 `get_location` / `_format_gps_location` / `_lookup_ip_data`；[server.py](server.py) 的 `LocationPermissionBroker`；前端 `web/static/app.js` 的 `showLocationPermission` / `allowLocation` |
 | 地理查询 | [tools.py](tools.py) 的 `geo_lookup` / `_reverse_lookup` / `_forward_geocode_cached` / `_haversine_km` |
@@ -2388,7 +2408,7 @@ python -m unittest discover -s tests -v
 
 ```text
 一句话：
-  本地 ReAct Agent = 固定 LLM 策略 + 26 个工具 + 两层记忆 + 手写循环。
+  本地 ReAct Agent = 固定 LLM 策略 + 15 个工具 + 两层记忆 + 手写循环。
 
 论文四个数字：
   HotpotQA：ReAct 27.4 < CoT 29.4；
@@ -2408,7 +2428,7 @@ python -m unittest discover -s tests -v
 
 三个边界：
   不是训练；不是 RAG；不是生产系统。
-  不是论文逐字复现：论文 few-shot、3 个受控动作；本项目 zero-shot、26 个开放工具。
+  不是论文逐字复现：论文 few-shot、3 个受控动作；本项目 zero-shot、15 个开放工具。
 
 三个已知问题：
   DNS rebinding 窗口；跨进程写不协调；摘要保真度与增量漂移。

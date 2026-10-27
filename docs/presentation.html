@@ -337,8 +337,8 @@
           </div>
         </div>
         <div class="stack">
-          <div class="card"><div class="stat">21</div><p>本地工具</p></div>
-          <div class="card"><div class="stat aqua">138</div><p>离线测试</p></div>
+          <div class="card"><div class="stat">15</div><p>本地工具</p></div>
+          <div class="card"><div class="stat aqua">148</div><p>离线测试</p></div>
           <div class="card"><div class="stat orange">2</div><p>次模型调用完成天气任务</p></div>
         </div>
       </div>
@@ -403,11 +403,11 @@
           </div>
           <div class="card">
             <h3>工具层</h3>
-            <p><span class="mono">tools.py</span>：26 个工具，统一走 <span class="mono">run_tool</span>。</p>
+            <p><span class="mono">tools.py</span>：15 个工具，统一走 <span class="mono">run_tool</span>。</p>
           </div>
           <div class="card">
             <h3>外部 API 与交互</h3>
-            <p>Open-Meteo 天气/空气质量；CLI + 本地 Web。</p>
+            <p>Open-Meteo 天气；必应搜索；CLI + 本地 Web。</p>
           </div>
         </div>
       </div>
@@ -471,12 +471,12 @@
             </thead>
             <tbody>
               <tr><td>1</td><td><span class="mono">get_weather</span></td><td>15.3°C，大部晴朗，降水概率 100%</td></tr>
-              <tr><td>2</td><td><span class="mono">get_air_quality</span></td><td>US AQI 168（不健康），PM2.5 22.6</td></tr>
+              <tr><td>2</td><td><span class="mono">get_air_quality</span>（旧版）</td><td>US AQI 168（不健康），PM2.5 22.6</td></tr>
               <tr><td>3</td><td><span class="mono">write_file</span></td><td>写入 641 字符，1112 字节</td></tr>
               <tr><td>4</td><td><span class="mono">Final Answer</span></td><td>汇总天气、空气质量与提示</td></tr>
             </tbody>
           </table>
-          <p class="caption">自动化测试：138 个用例，137 通过，1 跳过（Windows 符号链接权限）。</p>
+          <p class="caption">自动化测试：148 个用例，147 通过，1 跳过（Windows 符号链接权限）。</p>
         </div>
         <div class="stack">
           <div class="card"><div class="stat">4</div><p>轮 ReAct 调用</p></div>
@@ -505,7 +505,7 @@
             <li>可能重复调用、选错工具，需要拦截和评测。</li>
             <li>外部 API 可能失败，需要异常转 Observation。</li>
             <li>这是机制复现，不是论文指标复现；没有 benchmark。</li>
-            <li>26 个工具扩大了动作空间，工具选择本身是混淆变量。</li>
+            <li>15 个工具仍比论文的受控动作空间大，工具选择本身是混淆变量。</li>
             <li>文件与命令工具开放本机访问，靠逐次用户授权约束，不是权限沙箱。</li>
           </ul>
         </div>

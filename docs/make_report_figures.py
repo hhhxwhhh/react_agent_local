@@ -96,7 +96,7 @@ def figure_architecture():
     _title(
         fig,
         "手写 ReAct Agent：总体架构",
-        "固定 DeepSeek 策略 · 26 个本地工具 · 分层记忆 · 人类在环授权",
+        "固定 DeepSeek 策略 · 15 个本地工具 · 分层记忆 · 人类在环授权",
     )
 
     # Web UI
@@ -227,6 +227,7 @@ def figure_tests():
         ("test_sessions.py", "会话 / 记忆 / Web API", 36),
         ("test_vector_memory.py", "向量检索 / 位置与地理", 28),
         ("test_memory.py", "记忆并发 / TTL / 容量", 13),
+        ("test_evolution.py", "自进化裁判 / 安全沙箱", 10),
     ]
     fig, ax = plt.subplots(figsize=(11, 5.6))
     fig.subplots_adjust(left=0.34, right=0.92, top=0.76, bottom=0.16)
@@ -237,7 +238,7 @@ def figure_tests():
     bars = ax.barh(y, values, height=0.56, color=BLUE, edgecolor=SURFACE, linewidth=2, zorder=3)
     ax.set_yticks(y, labels, fontsize=10.5)
     ax.invert_yaxis()
-    ax.set_xlim(0, 60)
+    ax.set_xlim(0, 70)
     ax.set_xlabel("用例数", fontsize=10.5)
     ax.xaxis.grid(True, color=GRID, linewidth=0.8, zorder=0)
     ax.set_axisbelow(True)
@@ -255,7 +256,7 @@ def figure_tests():
             color=INK,
         )
 
-    fig.text(0.06, 0.93, "离线测试分布：138 个用例", fontsize=20, fontweight="bold", color=INK)
+    fig.text(0.06, 0.93, "离线测试分布：148 个用例", fontsize=20, fontweight="bold", color=INK)
     fig.text(
         0.06,
         0.865,
@@ -266,7 +267,7 @@ def figure_tests():
     fig.text(
         0.92,
         0.80,
-        "137 通过\n1 跳过",
+        "147 通过\n1 跳过",
         ha="right",
         va="top",
         fontsize=13,
@@ -770,9 +771,9 @@ def figure_memory_layers():
     ax.text(
         82.5,
         25.8,
-        "recall(key)：精确 key，确定性最高\n"
-        "search_memory(query)：向量 + 关键词混合，适合忘记 key\n"
-        "format_memory_context：会话优先预算，注入 system prompt",
+        "recall(key)：模型可调用的精确读取\n"
+        "search_memory_entry：内部检索，供测试与维护\n"
+        "format_memory_context：会话优先预算 + 相关性重排",
         fontsize=8.8,
         color=INK_2,
         va="top",

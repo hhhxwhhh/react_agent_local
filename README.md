@@ -16,7 +16,7 @@
 - 依赖：`requests` + `tzdata`（Windows 的时区数据库）+ `fastapi` / `uvicorn`（Web 客户端）
 - 两种使用方式：命令行（CLI）与本地 Web 聊天界面
 - 记忆分两层：**会话记忆**（每个对话独立）与**全局记忆**（跨对话共享），
-  并带本地向量索引：`search_memory` 可按相似度找回记忆，注入提示词前也会按问题相关性重排
+  并带本地向量索引：注入提示词前会按向量相似度与关键词相关性重排
 - 循环自带重复调用拦截、格式错误收口、取消检查和 token 用量统计
 
 > 原理拆解、ReAct 论文精读、评测设计、已知问题与组会 Q&A：[AGENT_DEEP_DIVE.md](AGENT_DEEP_DIVE.md)
@@ -148,9 +148,9 @@ python server.py --port 8080 --no-browser
 - 右下角“记忆管理”抽屉：查看/删除本会话记忆与全局记忆，过期条目会标记；
 - 定位按需授权：模型调用 `get_location` 时，输入框上方弹出权限卡片；
   允许后使用浏览器 GPS，拒绝或超时则回退到公网 IP 的城市级估算；
-- 本机操作按需授权：模型调用 `write_file` / `edit_file` / `run_command` 时，
-  卡片会显示目标路径或完整命令，可选择「允许一次」或「拒绝」；拒绝后工具返回
-  失败 Observation，模型不会绕过；
+- 本机操作按需授权：模型调用 `write_file` / `apply_patch` / `run_command` /
+  `run_tests` / `git` 时，卡片会显示目标路径或完整命令，可选择「允许一次」或
+  「拒绝」；拒绝后工具返回失败 Observation，模型不会绕过；
 - 回答支持 Markdown（代码块、列表、粗体、链接）；
 - 上下文过长时自动压缩：单轮轨迹保留最近步骤原文，较早步骤变成摘要；
   跨轮历史把较早对话增量摘要后写入会话文件，而不是简单丢弃；
@@ -208,10 +208,51 @@ python agent.py --max-steps 10 --model deepseek-chat --no-color "问题"
 python agent.py --yes "重构 demo/ 下的脚本并运行测试"
 ```
 
-CLI 在 `write_file` / `edit_file` / `apply_patch` / `move_file` / `delete_file` /
-`run_tests` / `git` 写操作 / `run_command` 前会打印目标路径、命令或 Git 操作，
-并等待 `y/N`；输入非 `y`、直接回车、`Ctrl+C` 或 `Ctrl+D` 都按拒绝处理。
+CLI 在 `write_file` / `apply_patch` / `run_tests` / `git` 写操作 / `run_command`
+前会打印目标路径、命令或 Git 操作，并等待 `y/N`；输入非 `y`、直接回车、
+`Ctrl+C` 或 `Ctrl+D` 都按拒绝处理。
 `--yes` 只跳过工具授权，不影响 `get_location` 的定位授权流程。
+
+### 3.3 自进化 Harness
+
+`evolution.py` 把“改代码”变成一个可回滚的分代闭环：当前版本 Agent 修改自己，
+外层裁判独立验证，通过后提交并打 `evo-gen-N` 标签；下一代由子进程启动，
+因此会加载上一代刚提交的新代码。
+
+```bash
+# 先看历史
+python evolution.py --status
+
+# 跑一代：Agent 自主选择最小改进目标
+python evolution.py --generations 1 --yes
+
+# 指定目标和连续迭代；可选评测命令输出 score=...
+python evolution.py \
+  --objective "补强某个具体工具的错误处理" \
+  --generations 3 --yes \
+  --eval-command "python your_eval.py"
+```
+
+每代的门槛：
+
+```text
+工作区干净
+  → 基线测试 + 安全检查通过
+  → Agent 修改源码
+  → 冻结路径检查（tests/、evolution.py、config.py、.env 等）
+  → 改动量预算 + py_compile + 安全检查
+  → 完整测试通过且测试数不减少
+  → 可选评测分数不低于 baseline
+  → 接受：git commit + tag evo-gen-N
+  → 拒绝：保存 diff 到 data/evolution/rejected/ 并 git reset --hard 回滚
+```
+
+可进化范围包括 `agent.py`、`tools.py`、`prompts.py`、`harness.py` 等；
+`harness.py` 是可进化的元策略，`evolution.py`、`tests/`、`config.py` 是冻结的
+裁判边界。记录写入 `data/evolution/ledger.jsonl`（已 gitignore）。
+
+注意：Harness 要求工作区干净，且不会自动 push。默认只用测试作为选择信号；
+真正的能力提升需要你自己提供固定任务集和 `--eval-command`。
 
 ---
 
@@ -273,34 +314,30 @@ Question ───────>│  DeepSeek（system + scratchpad）│
 
 ## 5. 工具
 
+当前动作空间只注册 15 个工具，按用途分为四组：
+
 | 工具 | 参数 | 说明 |
 |---|---|---|
 | `get_weather` | `city` | Open-Meteo 地理编码 + 天气预报，实时天气和未来 3 天 |
-| `get_air_quality` | `city` | 实时空气质量：US AQI、PM2.5、PM10、臭氧、二氧化氮等 |
 | `web_search` | `query`, `count` | 必应中文搜索（RSS 优先，HTML 解析兜底） |
 | `fetch_url` | `url`, `max_chars` | 抓取网页并提取正文，带内网地址拦截 |
-| `calculate` | `expression` | AST 安全求值，支持 `+ - * / // % **`、`sqrt`、`log`、`sin` 等 |
-| `get_current_time` | `location` | 城市/IANA 时区的当前时间、星期和 UTC 偏移，支持中英文城市名 |
 | `get_location` | `ip` | 调用时由界面弹出位置授权；允许后返回设备 GPS（含精度、反向地理编码）；拒绝/超时回退公网 IP 城市级估算。显式传 `ip` 时直接按该 IP 查询 |
 | `geo_lookup` | `operation`, `latitude`, `longitude`, `query`, `origin`, `destination`, `limit` | 坐标与地名互转：`reverse` 坐标→地址，`forward` 地名→坐标候选，`distance` 本地算直线距离/方位角/中点。不需要额外 Key |
-| `date_calc` | `operation`, `start_date`, `end_date`, `days` | 日期差、日期加减、星期/ISO 周/年内天数/闰年 |
-| `convert_units` | `value`, `from_unit`, `to_unit` | 长度、质量、温度、面积、体积、速度换算，支持“公里/英里”“摄氏度/华氏度”等中英文写法 |
 | `list_files` | `path`, `recursive`, `max_entries` | 列出本机任意目录；相对路径以项目根目录为基准 |
 | `read_file` | `path`, `max_chars` | 读取本机文本文件（UTF-8/GB18030，最大 5 MB） |
 | `write_file` | `path`, `content`, `append` | 写入或追加文本文件，自动创建父目录；需授权 |
-| `edit_file` | `path`, `old_text`, `new_text`, `replace_all` | 精确替换文件片段；`old_text` 必须唯一，否则报错；需授权 |
 | `apply_patch` | `patches` | 原子地批量修改多个文件；任一匹配失败则整批不落盘；需授权 |
-| `move_file` | `source`, `destination`, `overwrite` | 移动或重命名文件/目录；需授权 |
-| `delete_file` | `path`, `recursive` | 删除文件或目录；`.git` / `data` / `.env` 受保护；需授权 |
 | `search_files` | `keyword`, `path`, `search_content`, `max_results` | 按路径/文件名或文件内容搜索本机目录 |
 | `run_tests` | `pattern`, `cwd`, `timeout` | 运行 unittest 测试套件并返回结构化结果；需授权 |
 | `git` | `operation`, `paths`, `message`, `ref`, `cwd` | status/diff/log/show/rev_parse/branch_list；add/commit/restore/branch/tag/checkout 需授权 |
 | `run_command` | `command`, `cwd`, `timeout` | 执行 shell 命令或脚本；自动选择 Git Bash/PowerShell；需授权 |
 | `remember` | `key`, `value`, `scope`, `ttl_days` | 保存记忆。`scope=session` 只属于当前对话；`scope=global` 跨对话共享；`ttl_days` 可设置有效期 |
 | `recall` | `key`, `scope` | 读取记忆；省略 key 时列出全部 |
-| `search_memory` | `query`, `scope`, `limit` | 语义/关键词混合检索记忆；`scope=all` 同时查会话与全局 |
-| `forget` | `key`, `scope` | 删除一条记忆；只在用户明确要求“忘记/删除”时调用 |
-| `get_exchange_rate` | `base`, `target`, `amount` | 实时汇率查询与金额换算（open.er-api.com，无需 Key） |
+
+`get_air_quality`、`calculate`、`get_current_time`、`date_calc`、`convert_units`、
+`get_exchange_rate`、`edit_file`、`move_file`、`delete_file`、`search_memory`、
+`forget` 的函数实现仍保留在 `tools.py` 中，供内部测试、CLI 记忆面板和安全边界
+检查使用；它们不再出现在 `describe_tools()` 中，也不能通过 `run_tool` 调用。
 
 ### 外部内容边界
 
@@ -314,12 +351,12 @@ Question ───────>│  DeepSeek（system + scratchpad）│
 
 - `path` 可以是绝对路径；相对路径以 `FILE_ROOT`（默认项目根目录）为基准；
 - 读取上限 5 MB，单次写入上限 1,000,000 字符；列表默认最多 200 项；
-- `edit_file` 做精确字符串替换。`old_text` 未找到或出现多次时拒绝执行，
-  避免改错位置；确需批量替换时显式设置 `replace_all=true`；
+- `apply_patch` 做精确字符串替换。`old_text` 未找到或出现多次时拒绝执行，
+  避免改错位置；多个文件可以一次原子提交，任一匹配失败则整批不落盘；
 - 递归搜索会跳过 `.git`、`node_modules`、`__pycache__`、虚拟环境等目录，
   最多扫描 500 个文件；
 - 覆盖文件前，提示词要求模型先用 `read_file` 查看原内容；修改优先用
-  `edit_file`，不要用 `write_file` 重写整个文件；
+  `apply_patch`，不要用 `write_file` 重写整个文件；
 - 需要恢复旧行为时设置 `FILE_ACCESS_MODE=workspace`，此时所有路径必须位于
   项目下的 `workspace/`，`../`、外部绝对路径和符号链接逃逸都会被拒绝。
 
@@ -356,14 +393,14 @@ POST: /api/tool-permission
 ### 自进化的推荐闭环
 
 新增的 `apply_patch` / `run_tests` / `git` 让 Agent 可以修改自己的源码并验证，
-但“改代码”不等于“进化”。推荐把流程固定为：
+`evolution.py` 则把流程固定为可回滚的分代闭环：
 
 ```text
 git status / git diff
   → 建立回滚点（git tag 或 commit）
   → 用 apply_patch 做最小修改
   → run_tests 跑完整测试
-  → 通过则保留；失败则 git restore / 回到上一个 tag
+  → 通过则提交并打 evo-gen-N；失败则 git reset --hard 回到 baseline
   → 记录“改了什么、为什么、测试结果”
 ```
 
@@ -373,7 +410,8 @@ git status / git diff
 - `.git`、`data/`、`.env`、权限确认逻辑和安全边界默认不可删除/移动；
 - 不要执行 `git push`、强制推送、改写历史或删除分支/标签；
 - 测试通过只证明工程正确性；要证明“能力变强”，还需要固定任务集、baseline
-  和 held-out 评测，工具层目前没有替你伪造这个信号。
+  和 held-out 评测。`evolution.py --eval-command` 可以接入你自己的评分脚本，
+  否则只能做“无回归”迭代，不能保证每代都在变强。
 
 ### GPS 定位（工具调用时授权）
 
@@ -454,7 +492,8 @@ POST: /api/location-permission
 1. 每次发送消息前，服务端把**当前会话记忆 + 全局记忆**压缩后注入提示词；
 2. **会话优先**：会话记忆先拿 60% 预算（至少 400 字符），全局记忆使用剩余预算，
    不会再出现“全局记忆太多把会话记忆挤没”的情况；
-3. Agent 也可以主动调用 `remember` / `recall` / `forget` 读写和删除记忆；
+3. Agent 可以主动调用 `remember` / `recall` 读写记忆；删除通过 CLI 的 `:forget`
+   或 Web 记忆管理面板完成；
 4. Web 端默认 `scope=session`，只有用户明确表达长期偏好时才写 `scope=global`；
 5. 记忆条目带 `created_at`、`updated_at`、`revision`，可选 `expires_at`；
    过期条目不会注入提示词，并在下一次写入时自动清理；
@@ -467,8 +506,8 @@ POST: /api/location-permission
    “目标 / 已完成动作 / 关键事实与 URL / 错误与未决问题”，最近步骤保留原文；
 10. **跨轮压缩**：历史超过阈值后，只把最近 8 条对话保留原文，更早内容增量合并进
     `history_summary`。摘要失败会退回抽取式压缩，不会因为压缩失败而中断回答；
-11. **向量检索**：每条记忆额外写入 SQLite 向量索引。查询时用“余弦相似度 + 字面重合”
-    的混合分数排序，`search_memory` 可以按自然语言找回记忆，不再依赖精确 key；
+11. **向量检索**：每条记忆额外写入 SQLite 向量索引。内部的 `search_memory_entry`
+    和注入重排会用“余弦相似度 + 字面重合”的混合分数排序，不再完全依赖精确 key；
 12. **相关性重排**：记忆条目达到 6 条后，注入提示词前先按与当前问题的相关性排序，
     同样预算下优先放入更可能用得上的记忆；
 13. **索引只是缓存**：事实来源仍是 `memory.json` / 会话 JSON。检索命中后还会回到
@@ -553,6 +592,8 @@ react_agent/
 ├── prompts.py          # ReAct 系统提示词（含记忆与工具安全规则）
 ├── tools.py            # 二十六个工具 + 工具注册表
 ├── config.py           # .env / 环境变量加载
+├── harness.py          # 可进化的自进化元策略（目标与下一代提示词）
+├── evolution.py        # 不可进化的裁判：基线/验证/提交/回滚/分代记录
 ├── web/
 │   ├── index.html      # 聊天界面
 │   └── static/
@@ -572,7 +613,8 @@ react_agent/
 │   ├── test_agent.py        # 解析、工具、ReAct 循环
 │   ├── test_memory.py       # 并发、TTL、容量、上下文预算、迁移
 │   ├── test_sessions.py     # 会话、分层记忆、Web API
-│   └── test_vector_memory.py# 向量检索、关键词兜底、位置与地理查询工具
+│   ├── test_vector_memory.py# 向量检索、关键词兜底、位置与地理查询工具
+│   └── test_evolution.py    # 自进化裁判、diff 预算、评分解析、沙箱安全检查
 ├── AGENT_DEEP_DIVE.md  # 原理、评测与组会答辩手册
 ├── 2210.03629v3.pdf    # ReAct 原论文（ICLR 2023）
 ├── requirements.txt
@@ -584,7 +626,7 @@ react_agent/
 
 ## 7. 测试
 
-离线测试（共 138 个用例，不需要 Key、不需要网络；符号链接用例在无权限的
+离线测试（共 148 个用例，不需要 Key、不需要网络；符号链接用例在无权限的
 Windows 环境会自动跳过）：
 
 ```bash
@@ -593,7 +635,7 @@ python -m unittest discover -s tests -v
 
 覆盖内容：ReAct 解析与循环、引用提取、重复调用拦截、格式错误收口、取消检查、
 token 用量累计、工具安全、工作区模式与符号链接逃逸、非受限模式外部路径读写、
-`edit_file` 唯一匹配校验、`apply_patch` 原子回滚、移动/删除与受保护路径拦截、
+内部文件函数的唯一匹配校验、`apply_patch` 原子回滚、受保护路径拦截、
 写文件/测试/Git/命令授权（允许与拒绝）、命令执行、`run_tests` 结构化结果、
 Git status/add 与权限校验、SSRF 重定向拦截、AQI 分级、会话 CRUD、
 会话/全局记忆隔离、记忆并发写、
@@ -604,7 +646,8 @@ TTL 与过期清理、容量上限、上下文预算、单轮/跨轮上下文压
 一次性失效、缺坐标校验）、工具触发的写文件/命令授权（token 等待/唤醒、
 允许/拒绝、一次性失效）、`geo_lookup` 的坐标校验、Haversine 距离/方位角/中点、
 反向地理编码供应商回退、正向地理编码候选与回退、`/api/chat` 坐标传递与不落盘、
-非法坐标 422 校验、历史与记忆注入、SSE 流式接口、会话落盘。
+非法坐标 422 校验、历史与记忆注入、SSE 流式接口、会话落盘、自进化裁判的
+冻结路径检查、diff 行数预算、测试/评分解析、临时沙箱安全探针。
 
 工具联网检查：
 
@@ -670,15 +713,22 @@ python agent.py --check-tools
 
 ## 9. 安全说明
 
-- `calculate` 使用 AST 白名单求值，不会执行任意 Python 代码。
+- 内部的 `calculate` 函数使用 AST 白名单求值，不会执行任意 Python 代码；
+  它已不在 Agent 的动作空间中。
 - `fetch_url` 只允许 http/https；手动跟随重定向并逐跳校验公网地址，
   阻止回环/内网/链路本地/保留地址，响应体限制 2 MB。
-- 默认允许访问本机任意文件路径；写文件、编辑/移动/删除、批量补丁、运行测试、
-  Git 写操作和执行命令前必须由用户允许一次。`.git`、`data/`、`.env` 默认禁止
-  通过通用文件工具写入、移动或删除。`REQUIRE_TOOL_APPROVAL=false` 会关闭确认，
+- 默认允许访问本机任意文件路径；写文件、批量补丁、运行测试、Git 写操作和
+  执行命令前必须由用户允许一次。`.git`、`data/`、`.env` 默认禁止通过通用
+  文件工具写入、移动或删除。`REQUIRE_TOOL_APPROVAL=false` 会关闭确认，
   只应在隔离或受控环境中使用。
 - `run_command` 直接执行本机命令，超时上限 600 秒；它不是安全沙箱，模型仍可能
   执行破坏性操作，因此提示词禁止高危命令，且每次调用都需要用户确认。
+- 自进化只能在干净工作区启动；`evolution.py` 会冻结 `tests/`、`config.py`、
+  `.env`、`data/` 等裁判/密钥边界，拒绝二进制改动和超预算 diff，并在临时副本里
+  重跑安全探针。`--yes` 仍自动拒绝 Agent 自行 commit/tag/checkout 以及
+  `git push`、`reset --hard`、递归删除等破坏性命令。
+- 被拒绝候选的 diff 保存在 `data/evolution/rejected/`，接受候选才会本地提交并
+  打 `evo-gen-N` 标签；Harness 不会 push，也不会改写远程历史。
 - `FILE_ACCESS_MODE=workspace` 可以恢复旧沙箱；工作区模式会拒绝 `../`、外部绝对
   路径和符号链接逃逸，递归搜索也会跳过指向外部的符号链接。
 - 外部网页和搜索结果会用边界标记包裹，提示模型只当数据、不当指令。

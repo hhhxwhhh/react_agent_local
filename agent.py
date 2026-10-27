@@ -43,15 +43,11 @@ STOP_SEQUENCES = ["Observation:", "Observation："]
 # 这些工具会改变外部状态；调用后清空“已见调用”，允许模型重新读取变化后的结果。
 STATE_CHANGING_TOOLS = {
     "write_file",
-    "edit_file",
     "apply_patch",
-    "move_file",
-    "delete_file",
     "run_command",
     "run_tests",
     "git",
     "remember",
-    "forget",
 }
 # 连续两次被判定为重复调用，或连续三次格式错误后，提前收口。
 MAX_CONSECUTIVE_DUPLICATES = 2
@@ -1039,15 +1035,8 @@ class ReActAgent:
 
 def _check_tools() -> int:
     check_file = "demo/tool_check_runtime.txt"
-    moved_file = "demo/tool_check_runtime_moved.txt"
     checks = [
-        ("get_current_time", {"location": "北京"}),
-        ("date_calc", {"start_date": "2026-10-20", "end_date": "2026-12-31"}),
-        ("convert_units", {"value": 100, "from_unit": "°F", "to_unit": "摄氏度"}),
-        ("calculate", {"expression": "(12+8)*3"}),
-        ("get_exchange_rate", {"base": "CNY", "target": "USD", "amount": 100}),
         ("get_weather", {"city": "北京"}),
-        ("get_air_quality", {"city": "北京"}),
         ("get_location", {}),
         (
             "geo_lookup",
@@ -1065,43 +1054,24 @@ def _check_tools() -> int:
         ),
         ("read_file", {"path": check_file}),
         (
-            "edit_file",
-            {
-                "path": check_file,
-                "old_text": "工具检查通过",
-                "new_text": "工具检查通过（edit）",
-            },
-        ),
-        (
             "apply_patch",
             {
                 "patches": [
                     {
                         "path": check_file,
-                        "old_text": "工具检查通过（edit）",
+                        "old_text": "工具检查通过",
                         "new_text": "工具检查通过（patch）",
                     }
                 ]
             },
         ),
-        ("run_tests", {"pattern": "tests.test_agent.TestFileTools.test_write_read_and_list"}),
-        ("git", {"operation": "status"}),
-        ("run_command", {"command": "echo react-agent-ok", "cwd": "demo"}),
-        (
-            "move_file",
-            {
-                "source": check_file,
-                "destination": moved_file,
-            },
-        ),
-        ("read_file", {"path": moved_file}),
         ("search_files", {"keyword": "工具检查", "path": "demo"}),
         ("list_files", {"path": "demo"}),
-        ("delete_file", {"path": moved_file}),
+        ("run_command", {"command": "echo react-agent-ok", "cwd": "demo"}),
+        ("run_tests", {"pattern": "tests.test_agent.TestFileTools.test_write_read_and_list"}),
+        ("git", {"operation": "status"}),
         ("remember", {"key": "_self_check", "value": "工具检查通过"}),
         ("recall", {"key": "_self_check"}),
-        ("search_memory", {"query": "工具检查"}),
-        ("forget", {"key": "_self_check"}),
     ]
     failures = 0
     print(_bold("检查本地工具（不需要 API Key）"))
@@ -1112,7 +1082,11 @@ def _check_tools() -> int:
         if result.startswith("ERROR"):
             failures += 1
 
-    # 清理工具检查写入的临时记忆
+    # 清理工具检查写入的临时文件和临时记忆
+    try:
+        os.remove(check_file)
+    except OSError:
+        pass
     try:
         forget_memory("_self_check")
     except Exception:

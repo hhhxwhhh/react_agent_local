@@ -208,9 +208,7 @@ class TestScopedMemory(TempStoreCase):
         tools.run_tool(
             "remember", {"key": "茶", "value": "龙井"}, context=self.context
         )
-        result = tools.run_tool(
-            "forget", {"key": "茶"}, context=self.context
-        )
+        result = tools.forget("茶", context=self.context)
         self.assertIn("已删除记忆", result)
         self.assertIn("本会话记忆", result)
         self.assertEqual(self.store.get_memory(self.session["id"]), {})
@@ -227,10 +225,8 @@ class TestScopedMemory(TempStoreCase):
             {"key": "常用城市", "value": "杭州", "scope": "global"},
             context=self.context,
         )
-        result = tools.run_tool(
-            "forget",
-            {"key": "常用城市", "scope": "global"},
-            context=self.context,
+        result = tools.forget(
+            "常用城市", scope="global", context=self.context
         )
         self.assertIn("已删除记忆", result)
         self.assertIn("全局记忆", result)

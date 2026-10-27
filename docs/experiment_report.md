@@ -77,10 +77,10 @@ Thought → Action → Observation → Thought → ... → Final Answer
 - **策略模型**：DeepSeek `deepseek-chat`，OpenAI 兼容 Chat Completions。
 - **ReAct 循环**：`agent.py` 中的 `ReActAgent.run()`。
 - **工具层**：`tools.py` 中的 `TOOL_SPECS`、`TOOL_FUNCS` 和 `run_tool()`。
-- **外部 API**：Open-Meteo 天气、空气质量；必应搜索；汇率等。
+- **外部 API**：Open-Meteo 天气、必应搜索；空气质量与汇率函数仍保留在内部库中，但未注册给模型。
 - **交互层**：CLI 与本地 Web 聊天界面（FastAPI + SSE）。
 
-当前共注册 26 个工具，本实验重点使用 `get_weather`、`get_air_quality`、`write_file`；`edit_file`、`apply_patch`、`run_tests`、`git` 与 `run_command` 用于本机文件修改、代码执行和自进化验证，写操作调用前需用户授权。
+当前动作空间共注册 15 个工具，本实验重点使用 `get_weather`、`web_search`、`fetch_url`、`write_file`；`apply_patch`、`run_tests`、`git` 与 `run_command` 用于本机文件修改、代码执行和自进化验证，写操作调用前需用户授权。
 
 #### 3.2 ReAct 循环
 
@@ -206,7 +206,7 @@ TOOL_FUNCS["get_weather"] = get_weather
 | 单次输出上限 | 2048 tokens |
 | 天气 / 空气质量 | Open-Meteo 公开 API |
 | 工具数量 | 21 |
-| 离线测试 | 138 个用例 |
+| 离线测试 | 148 个用例 |
 
 #### 4.2 工具自检
 
@@ -216,7 +216,7 @@ TOOL_FUNCS["get_weather"] = get_weather
 python agent.py --check-tools
 ```
 
-结果：**26 个工具全部检查通过**。其中天气工具返回了北京 2026-10-26 16:45 的实时观测，说明外部 API 链路正常；`edit_file`、`apply_patch`、`move_file`、`delete_file`、`run_tests`、`git` 与 `run_command` 也完成了本地文件编辑、测试和 Git 自检。
+结果：**15 个工具全部检查通过**。其中天气工具返回了北京的实时观测，说明外部 API 链路正常；`write_file`、`apply_patch`、`run_tests`、`git` 与 `run_command` 也完成了本地文件修改、测试和 Git 自检。
 
 #### 4.3 对照实验：Direct LLM
 
@@ -292,6 +292,9 @@ Final Answer: 北京今天（2026-10-26）的天气情况：
 查一下北京现在的天气和空气质量，整理成一份简短简报，保存到 demo/beijing_brief.md
 ```
 
+> 说明：这一组实验在工具精简前完成，当时动作空间包含 `get_air_quality`；
+> 当前版本已移除该工具，保留原始轨迹用于对照，不代表当前动作空间。
+
 实际执行了 4 轮：
 
 | 轮次 | Thought 概要 | Action | Observation 概要 |
@@ -313,7 +316,7 @@ Final Answer: 北京今天（2026-10-26）的天气情况：
 |---|---|---|---|---|---|
 | 北京今天天气 | Direct LLM | 0 | 1 | 42 | 无法实时获取 |
 | 北京天气 + 出门建议 | ReAct Agent | `get_weather` | 2 | 8135 | 实时天气 + 建议 |
-| 天气 + 空气质量 + 简报 | ReAct Agent | `get_weather`、`get_air_quality`、`write_file` | 4 | 17591 | 生成并保存简报 |
+| 天气 + 空气质量 + 简报（工具精简前） | ReAct Agent | `get_weather`、`get_air_quality`、`write_file` | 4 | 17591 | 生成并保存简报 |
 
 需要说明：ReAct 的 token 开销明显更高，因为它要携带系统提示词、工具 schema 和 scratchpad，并且每轮都要重新请求模型。这不是“效率更高”，而是“能完成 Direct LLM 完成不了的任务”。
 
@@ -328,15 +331,15 @@ python -m unittest discover -s tests -v
 结果：
 
 ```text
-Ran 138 tests in 6.651s
+Ran 148 tests in 6.651s
 OK (skipped=1)
 ```
 
-138 个用例中 137 个通过，1 个符号链接用例因 Windows 权限跳过。覆盖 ReAct 解析与循环、工具安全、文件访问与命令执行、Git 与测试运行、SSRF 拦截、记忆并发与 TTL、上下文压缩、会话隔离、SSE、位置授权、工具授权、地理查询等。
+148 个用例中 147 个通过，1 个符号链接用例因 Windows 权限跳过。覆盖 ReAct 解析与循环、工具安全、文件访问与命令执行、Git 与测试运行、自进化裁判与安全沙箱、SSRF 拦截、记忆并发与 TTL、上下文压缩、会话隔离、SSE、位置授权、工具授权、地理查询等。
 
 ![图2 离线测试分布](figures/fig2_test_coverage.png)
 
-*图2：138 个离线用例的分布。*
+*图2：148 个离线用例的分布。*
 
 ---
 
@@ -365,7 +368,7 @@ OK (skipped=1)
 #### 5.3 局限
 
 - 这是一个**机制复现**，不是 ReAct 论文的指标复现；没有公开 benchmark、baseline 和统计检验。
-- 当前有 26 个工具，而论文中的动作空间通常很小；工具数量本身会增加工具选择难度，不能把实验结果直接归因于“ReAct 更强”。
+- 当前有 15 个工具，仍多于论文通常的受控动作空间；工具数量本身会增加工具选择难度，不能把实验结果直接归因于“ReAct 更强”。
 - 默认允许文件工具访问本机任意路径，`run_command` 以当前用户权限执行命令；现有防护是用户确认和提示词约束，不是权限沙箱。
 - 模型仍然是云端 DeepSeek API，不是本地权重；“本地”指 Agent 循环、工具和 Web 服务在本机。
 - 使用文本协议而不是原生 function calling；没有并行工具调用。
@@ -439,7 +442,7 @@ python -m unittest discover -s tests -v
 | 文件 | 作用 |
 |---|---|
 | `agent.py` | ReAct 循环、解析、上下文压缩、CLI |
-| `tools.py` | 26 个工具 + `TOOL_SPECS` / `TOOL_FUNCS` / `run_tool` |
+| `tools.py` | 15 个注册工具 + `TOOL_SPECS` / `TOOL_FUNCS` / `run_tool` |
 | `prompts.py` | ReAct 系统提示词、记忆与工具安全规则 |
 | `llm.py` | DeepSeek Chat Completions 客户端 |
 | `server.py` | FastAPI 服务、SSE、会话 API |
@@ -447,7 +450,7 @@ python -m unittest discover -s tests -v
 | `vector_memory.py` | 本地特征哈希向量索引 |
 | `storage.py` | 共享路径锁 + JSON 原子写入 |
 | `sessions.py` | 会话持久化 |
-| `tests/` | 138 个离线测试 |
+| `tests/` | 148 个离线测试 |
 
 ### 附录 B：完整天气任务轨迹
 

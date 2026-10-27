@@ -142,9 +142,7 @@ class TestMemorySearch(VectorCase):
             context=self.context,
         )
 
-        result = tools.run_tool(
-            "search_memory", {"query": "我喜欢喝什么茶"}, context=self.context
-        )
+        result = tools.search_memory("我喜欢喝什么茶", context=self.context)
         self.assertIn("饮料偏好", result)
         self.assertIn("龙井茶", result)
         self.assertNotIn("常住城市", result)
@@ -155,10 +153,8 @@ class TestMemorySearch(VectorCase):
             {"key": "城市", "value": "杭州", "scope": "global"},
             context=self.context,
         )
-        result = tools.run_tool(
-            "search_memory",
-            {"query": "杭州", "scope": "all"},
-            context=self.context,
+        result = tools.search_memory(
+            "杭州", scope="all", context=self.context
         )
         self.assertIn("[全局] 城市", result)
 
