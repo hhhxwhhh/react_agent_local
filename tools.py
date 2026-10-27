@@ -13,8 +13,13 @@ import ipaddress
 import json
 import math
 import operator
+import os
 import re
+import shutil
+import signal
 import socket
+import subprocess
+import time
 import urllib.parse
 import xml.etree.ElementTree as ET
 from datetime import date, datetime, timedelta
@@ -25,7 +30,13 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import requests
 
-from config import BASE_DIR
+from config import (
+    BASE_DIR,
+    COMMAND_MAX_OUTPUT_CHARS,
+    COMMAND_TIMEOUT,
+    FILE_ACCESS_MODE,
+    FILE_ROOT,
+)
 from memory import (
     GLOBAL_MEMORY_FILE,
     JsonMemory,
@@ -1648,33 +1659,56 @@ def convert_units(value: float, from_unit: str, to_unit: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 本地文件工具（限定在 workspace/ 目录内）
+# 本地文件工具（默认可访问本机任意路径；FILE_ACCESS_MODE=workspace 恢复沙箱）
 # ---------------------------------------------------------------------------
 
 WORKSPACE_DIR = BASE_DIR / "workspace"
+MAX_READ_BYTES = 5_000_000
+MAX_WRITE_CHARS = 1_000_000
+SEARCH_SKIP_DIRS = {
+    ".git",
+    ".hg",
+    ".svn",
+    "__pycache__",
+    "node_modules",
+    ".venv",
+    "venv",
+    "dist",
+    "build",
+    ".next",
+    ".cache",
+    "target",
+}
 
 
-def _workspace_path(relative: str) -> Path:
-    workspace = WORKSPACE_DIR.resolve()
-    raw = str(relative or ".").strip().replace("\\", "/")
-    candidate = Path(raw)
+def _resolve_path(path: str) -> Path:
+    """把绝对路径或相对路径解析成本机路径。
+
+    unrestricted 模式下不做目录包含检查；workspace 模式保留旧沙箱行为。
+    """
+    raw = str(path or ".").strip()
+    candidate = Path(raw).expanduser()
     if not candidate.is_absolute():
-        candidate = workspace / candidate
-    candidate = candidate.resolve()
-    if candidate != workspace and workspace not in candidate.parents:
-        raise ValueError("路径必须位于 workspace 目录内，不允许访问外部文件")
+        candidate = Path(FILE_ROOT).expanduser().resolve() / candidate
+    candidate = candidate.resolve(strict=False)
+    if FILE_ACCESS_MODE == "workspace":
+        workspace = WORKSPACE_DIR.resolve()
+        if candidate != workspace and workspace not in candidate.parents:
+            raise ValueError(
+                "FILE_ACCESS_MODE=workspace 时，路径必须位于 workspace 目录内"
+            )
     return candidate
 
 
-def _display_workspace_path(path: Path) -> str:
+def _display_path(path: Path) -> str:
     try:
-        return path.relative_to(WORKSPACE_DIR.resolve()).as_posix() or "."
+        return path.relative_to(Path(FILE_ROOT).expanduser().resolve()).as_posix() or "."
     except ValueError:
         return str(path)
 
 
 def _is_within_workspace(path: Path) -> bool:
-    """解析符号链接后仍位于 workspace 内，才允许读取。"""
+    """解析符号链接后仍位于 workspace 内，才允许访问。"""
     try:
         resolved = path.resolve()
         workspace = WORKSPACE_DIR.resolve()
@@ -1683,30 +1717,91 @@ def _is_within_workspace(path: Path) -> bool:
     return resolved == workspace or workspace in resolved.parents
 
 
-def list_files(path: str = ".", recursive: bool = False) -> str:
-    """列出 workspace 目录下的文件和子目录。"""
-    WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
-    target = _workspace_path(path)
+def _is_path_allowed(path: Path) -> bool:
+    if FILE_ACCESS_MODE != "workspace":
+        return True
+    return _is_within_workspace(path)
+
+
+def _request_permission(
+    context: ToolContext | None,
+    *,
+    tool: str,
+    title: str,
+    detail: str,
+    **extra: Any,
+) -> None:
+    """在写文件、编辑文件或执行命令前请求用户确认。"""
+    requester = getattr(context, "request_tool_permission", None)
+    if requester is None:
+        return
+    payload = {"tool": tool, "title": title, "detail": detail, **extra}
+    if not requester(payload):
+        raise PermissionError("用户拒绝了本次操作")
+
+
+def _read_text_file(target: Path) -> str:
+    size = target.stat().st_size
+    if size > MAX_READ_BYTES:
+        raise ValueError(
+            f"文件超过 {MAX_READ_BYTES // 1_000_000} MB，暂不支持读取"
+        )
+    data = target.read_bytes()
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        try:
+            return data.decode("gb18030")
+        except UnicodeDecodeError as exc:
+            raise ValueError("无法按文本解码（可能是二进制文件）") from exc
+
+
+def list_files(
+    path: str = ".",
+    recursive: bool = False,
+    max_entries: int = 200,
+) -> str:
+    """列出本机目录下的文件和子目录。"""
+    target = _resolve_path(path)
     if not target.exists():
-        raise ValueError(f"路径不存在：{_display_workspace_path(target)}")
+        raise ValueError(f"路径不存在：{_display_path(target)}")
     if target.is_file():
-        return f"{_display_workspace_path(target)}（文件，{target.stat().st_size} 字节）"
+        return f"{_display_path(target)}（文件，{target.stat().st_size} 字节）"
 
-    entries = sorted(
-        (
-            item
-            for item in (target.rglob("*") if recursive else target.iterdir())
-            if _is_within_workspace(item)
-        ),
-        key=lambda item: (item.is_file(), _display_workspace_path(item).lower()),
-    )
-    shown = entries[:100]
-    if not shown:
-        return f"{_display_workspace_path(target)}/ 为空目录。"
+    limit = max(1, min(int(max_entries), 1000))
+    entries: list[Path] = []
+    if recursive:
+        for root, dirs, files in os.walk(target, followlinks=False, onerror=lambda _: None):
+            dirs[:] = sorted(
+                name
+                for name in dirs
+                if _is_path_allowed(Path(root) / name)
+            )
+            for name in dirs + sorted(files):
+                item = Path(root) / name
+                if not _is_path_allowed(item):
+                    continue
+                entries.append(item)
+                if len(entries) >= limit:
+                    break
+            if len(entries) >= limit:
+                break
+    else:
+        try:
+            children = sorted(
+                target.iterdir(),
+                key=lambda item: (item.is_file(), item.name.lower()),
+            )
+        except OSError as exc:
+            raise ValueError(f"无法读取目录：{exc}") from exc
+        entries = [item for item in children if _is_path_allowed(item)][:limit]
 
-    lines = [f"目录：{_display_workspace_path(target)}/（共 {len(entries)} 项）"]
-    for entry in shown:
-        rel = _display_workspace_path(entry)
+    if not entries:
+        return f"{_display_path(target)}/ 为空目录。"
+
+    lines = [f"目录：{_display_path(target)}/（显示 {len(entries)} 项）"]
+    for entry in entries:
+        rel = _display_path(entry)
         if entry.is_dir():
             lines.append(f"- {rel}/  [目录]")
         else:
@@ -1715,63 +1810,118 @@ def list_files(path: str = ".", recursive: bool = False) -> str:
             except OSError:
                 size = "?"
             lines.append(f"- {rel}  [{size} 字节]")
-    if len(entries) > 100:
-        lines.append(f"...（还有 {len(entries) - 100} 项未显示）")
+    if len(entries) >= limit:
+        lines.append(f"...（已达到显示上限 {limit} 项）")
     return "\n".join(lines)
 
 
 def read_file(path: str, max_chars: int = 4000) -> str:
-    """读取 workspace 内的文本文件。"""
-    target = _workspace_path(path)
+    """读取本机文本文件。"""
+    target = _resolve_path(path)
     if not target.exists():
-        raise ValueError(f"文件不存在：{_display_workspace_path(target)}")
+        raise ValueError(f"文件不存在：{_display_path(target)}")
     if target.is_dir():
         raise ValueError("目标是目录，请改用 list_files")
 
     size = target.stat().st_size
-    if size > 1_000_000:
-        raise ValueError("文件超过 1 MB，暂不支持读取")
-
-    data = target.read_bytes()
-    try:
-        text = data.decode("utf-8")
-    except UnicodeDecodeError:
-        try:
-            text = data.decode("gb18030")
-        except UnicodeDecodeError as exc:
-            raise ValueError("无法按文本解码（可能是二进制文件）") from exc
-
-    limit = max(200, min(int(max_chars), 12000))
-    header = f"文件：{_display_workspace_path(target)}（{size} 字节）\n\n"
+    text = _read_text_file(target)
+    limit = max(200, min(int(max_chars), 20000))
+    header = f"文件：{_display_path(target)}（{size} 字节）\n\n"
     if len(text) > limit:
         return header + text[:limit] + f"\n...[已截断，共 {len(text)} 字符]"
     return header + text
 
 
-def write_file(path: str, content: str, append: bool = False) -> str:
-    """在 workspace 内写入或追加文本文件。"""
-    target = _workspace_path(path)
-    if target == WORKSPACE_DIR.resolve():
-        raise ValueError("path 必须是文件路径，不能是 workspace 目录本身")
-    if target.is_dir():
+def write_file(
+    path: str,
+    content: str,
+    append: bool = False,
+    *,
+    context: ToolContext | None = None,
+) -> str:
+    """向本机任意路径写入或追加文本文件。"""
+    target = _resolve_path(path)
+    if target == Path(FILE_ROOT).expanduser().resolve():
+        raise ValueError("path 必须是文件路径，不能是项目根目录本身")
+    if target.exists() and target.is_dir():
         raise ValueError("目标是目录，不能写入")
     text = str(content)
-    if len(text) > 200_000:
-        raise ValueError("content 过长（上限 200000 字符）")
+    if len(text) > MAX_WRITE_CHARS:
+        raise ValueError(f"content 过长（上限 {MAX_WRITE_CHARS} 字符）")
+
+    action = "追加" if append else "写入"
+    _request_permission(
+        context,
+        tool="write_file",
+        title="文件写入权限",
+        detail=f"Agent 想{action}文件：\n{target}",
+        action=action,
+        path=str(target),
+    )
 
     target.parent.mkdir(parents=True, exist_ok=True)
     with target.open("a" if append else "w", encoding="utf-8", newline="\n") as handle:
         handle.write(text)
 
-    action = "追加" if append else "写入"
     return (
-        f"已{action}：{_display_workspace_path(target)}"
+        f"已{action}：{_display_path(target)}"
         f"（{len(text)} 字符，文件共 {target.stat().st_size} 字节）"
     )
 
 
+def edit_file(
+    path: str,
+    old_text: str,
+    new_text: str,
+    replace_all: bool = False,
+    *,
+    context: ToolContext | None = None,
+) -> str:
+    """精确替换文件中的文本；old_text 必须唯一，除非 replace_all=true。"""
+    target = _resolve_path(path)
+    if not target.exists():
+        raise ValueError(f"文件不存在：{_display_path(target)}")
+    if target.is_dir():
+        raise ValueError("目标是目录，不能编辑")
+
+    old = str(old_text)
+    new = str(new_text)
+    if not old:
+        raise ValueError("old_text 不能为空")
+
+    text = _read_text_file(target)
+    count = text.count(old)
+    if count == 0:
+        raise ValueError("old_text 在文件中未找到；请先 read_file 确认原文")
+    if count > 1 and not replace_all:
+        raise ValueError(
+            f"old_text 在文件中出现 {count} 次；请提供更长的唯一片段，"
+            "或设置 replace_all=true"
+        )
+
+    replacements = count if replace_all else 1
+    _request_permission(
+        context,
+        tool="edit_file",
+        title="文件编辑权限",
+        detail=f"Agent 想修改文件：\n{target}\n替换 {replacements} 处文本",
+        action="edit",
+        path=str(target),
+        replacements=replacements,
+    )
+
+    updated = text.replace(old, new, -1 if replace_all else 1)
+    with target.open("w", encoding="utf-8", newline="") as handle:
+        handle.write(updated)
+
+    return (
+        f"已编辑：{_display_path(target)}"
+        f"（替换 {replacements} 处，文件共 {target.stat().st_size} 字节）"
+    )
+
+
 # ---------------------------------------------------------------------------
-# 文件搜索工具（workspace 内按路径/内容搜索）
+# 文件搜索工具（默认在本机目录按路径/内容搜索；workspace 模式受沙箱限制）
 # ---------------------------------------------------------------------------
 
 
@@ -1781,37 +1931,47 @@ def search_files(
     search_content: bool = True,
     max_results: int = 20,
 ) -> str:
-    """在 workspace 内按文件名或文件内容搜索关键词。"""
+    """在本机目录中按文件名或文件内容搜索关键词。"""
     keyword = str(keyword).strip()
     if not keyword:
         raise ValueError("keyword 不能为空")
 
-    WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
-    target = _workspace_path(path)
+    target = _resolve_path(path)
     if not target.exists():
-        raise ValueError(f"路径不存在：{_display_workspace_path(target)}")
+        raise ValueError(f"路径不存在：{_display_path(target)}")
 
     limit = max(1, min(int(max_results), 50))
     if target.is_file():
-        candidates = [target] if _is_within_workspace(target) else []
+        candidates = [target] if _is_path_allowed(target) else []
     else:
-        candidates = [
-            item
-            for item in target.rglob("*")
-            if item.is_file() and _is_within_workspace(item)
-        ]
+        candidates = []
+        for root, dirs, files in os.walk(
+            target, followlinks=False, onerror=lambda _: None
+        ):
+            dirs[:] = sorted(
+                name
+                for name in dirs
+                if name not in SEARCH_SKIP_DIRS
+                and _is_path_allowed(Path(root) / name)
+            )
+            for name in sorted(files):
+                item = Path(root) / name
+                if _is_path_allowed(item):
+                    candidates.append(item)
+                if len(candidates) >= 500:
+                    break
+            if len(candidates) >= 500:
+                break
 
     needle = keyword.lower()
     matches: list[tuple[str, bool, str]] = []
     scanned = 0
 
-    for file_path in sorted(
-        candidates, key=lambda item: _display_workspace_path(item).lower()
-    ):
+    for file_path in sorted(candidates, key=lambda item: _display_path(item).lower()):
         if len(matches) >= limit or scanned >= 500:
             break
         scanned += 1
-        relative = _display_workspace_path(file_path)
+        relative = _display_path(file_path)
         name_match = needle in relative.lower()
         snippet = ""
 
@@ -1822,12 +1982,8 @@ def search_files(
 
         if search_content and small_enough:
             try:
-                raw = file_path.read_bytes()
-                try:
-                    text = raw.decode("utf-8")
-                except UnicodeDecodeError:
-                    text = raw.decode("gb18030")
-            except (OSError, UnicodeDecodeError):
+                text = _read_text_file(file_path)
+            except (OSError, ValueError):
                 text = ""
             if text:
                 for line_number, line in enumerate(text.splitlines(), 1):
@@ -1838,7 +1994,7 @@ def search_files(
         if name_match or snippet:
             matches.append((relative, name_match, snippet))
 
-    scope = _display_workspace_path(target)
+    scope = _display_path(target)
     if not matches:
         suffix = "（已达到 500 个文件的扫描上限）" if scanned >= 500 else ""
         return f"在 {scope} 中没有找到包含“{keyword}”的文件名或内容{suffix}。"
@@ -1852,6 +2008,121 @@ def search_files(
         if snippet:
             lines.append(f"   {snippet}")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# 本机命令执行（需要用户授权；超时终止进程树）
+# ---------------------------------------------------------------------------
+
+
+def _shell_argv(command: str) -> list[str]:
+    """选择本机 shell：Windows 优先 Git Bash，其次 PowerShell；POSIX 用 sh。"""
+    if os.name == "nt":
+        bash = shutil.which("bash")
+        if bash:
+            return [bash, "-lc", command]
+        return ["powershell", "-NoProfile", "-NonInteractive", "-Command", command]
+    return ["/bin/sh", "-lc", command]
+
+
+def _decode_command_output(data: bytes) -> str:
+    for encoding in ("utf-8", "gb18030"):
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="replace")
+
+
+def _terminate_process(process: subprocess.Popen) -> None:
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                capture_output=True,
+                timeout=10,
+            )
+        except Exception:
+            process.kill()
+    else:
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            process.kill()
+
+
+def run_command(
+    command: str,
+    cwd: str = "",
+    timeout: int = 0,
+    *,
+    context: ToolContext | None = None,
+) -> str:
+    """在本机 shell 中执行命令或代码。"""
+    command = str(command or "").strip()
+    if not command:
+        raise ValueError("command 不能为空")
+
+    workdir = _resolve_path(cwd or ".")
+    if not workdir.exists():
+        raise ValueError(f"工作目录不存在：{_display_path(workdir)}")
+    if not workdir.is_dir():
+        raise ValueError(f"工作目录不是目录：{_display_path(workdir)}")
+
+    limit_timeout = max(1, min(int(timeout or COMMAND_TIMEOUT), 600))
+    _request_permission(
+        context,
+        tool="run_command",
+        title="命令执行权限",
+        detail=f"Agent 想在以下目录执行命令：\n{workdir}\n\n命令：\n{command}",
+        action="run",
+        command=command,
+        cwd=str(workdir),
+    )
+
+    popen_kwargs: dict[str, Any] = {}
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        popen_kwargs["start_new_session"] = True
+
+    started = time.monotonic()
+    process = subprocess.Popen(
+        _shell_argv(command),
+        cwd=str(workdir),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        **popen_kwargs,
+    )
+    timed_out = False
+    try:
+        stdout, stderr = process.communicate(timeout=limit_timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        _terminate_process(process)
+        stdout, stderr = process.communicate()
+    elapsed = time.monotonic() - started
+
+    parts = [f"命令：{command}", f"目录：{workdir}"]
+    if timed_out:
+        parts.append(f"ERROR: 命令执行超时（{limit_timeout} 秒），已终止")
+    else:
+        parts.append(f"退出码：{process.returncode}")
+    parts.append(f"耗时：{elapsed:.2f}s")
+
+    output_parts = []
+    if stdout:
+        output_parts.append("stdout:\n" + _decode_command_output(stdout).rstrip())
+    if stderr:
+        output_parts.append("stderr:\n" + _decode_command_output(stderr).rstrip())
+    if not output_parts:
+        output_parts.append("（无输出）")
+    output = "\n\n".join(output_parts)
+    if len(output) > COMMAND_MAX_OUTPUT_CHARS:
+        output = output[:COMMAND_MAX_OUTPUT_CHARS] + "\n...[输出已截断]"
+    parts.append(output)
+    return "\n".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -2204,47 +2475,51 @@ TOOL_SPECS: dict[str, dict] = {
         },
     },
     "list_files": {
-        "description": "列出本地 workspace 目录下的文件和子目录（沙箱范围）。",
+        "description": "列出本机目录下的文件和子目录。path 可为绝对路径；相对路径以项目根目录为基准。",
         "parameters": {
             "type": "object",
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "相对 workspace 的目录路径，默认 .",
+                    "description": "目录路径，默认 .（项目根目录）；也可传 C:/Users 等绝对路径",
                 },
                 "recursive": {
                     "type": "boolean",
-                    "description": "是否递归列出所有子目录，默认 false",
+                    "description": "是否递归列出子目录，默认 false",
+                },
+                "max_entries": {
+                    "type": "integer",
+                    "description": "最多显示多少项，1-1000，默认 200",
                 },
             },
             "required": [],
         },
     },
     "read_file": {
-        "description": "读取本地 workspace 目录内的文本文件，适合查看笔记、数据和生成的代码。",
+        "description": "读取本机文本文件，适合查看源码、配置、笔记和数据。path 可为绝对路径；相对路径以项目根目录为基准。",
         "parameters": {
             "type": "object",
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "相对 workspace 的文件路径，例如 notes/todo.md",
+                    "description": "文件路径，例如 E:/project/src/main.py 或 README.md",
                 },
                 "max_chars": {
                     "type": "integer",
-                    "description": "最多读取多少字符，默认 4000，最大 12000",
+                    "description": "最多读取多少字符，默认 4000，最大 20000",
                 },
             },
             "required": ["path"],
         },
     },
     "write_file": {
-        "description": "在本地 workspace 目录内写入文本文件；默认覆盖同名文件，append=true 时追加。适合保存笔记、生成报告或代码。覆盖前应先 read_file 确认内容。",
+        "description": "向本机写入文本文件；默认覆盖同名文件，append=true 时追加。支持绝对路径，会先请求用户授权。覆盖前应先 read_file 确认内容。",
         "parameters": {
             "type": "object",
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "相对 workspace 的文件路径，例如 notes/report.md",
+                    "description": "文件路径，例如 E:/project/notes/report.md",
                 },
                 "content": {"type": "string", "description": "要写入的完整文本内容"},
                 "append": {
@@ -2254,9 +2529,10 @@ TOOL_SPECS: dict[str, dict] = {
             },
             "required": ["path", "content"],
         },
+        "context": True,
     },
     "search_files": {
-        "description": "在 workspace 内搜索文件：可按路径/文件名和文本内容匹配关键词，返回命中位置。",
+        "description": "在本机目录中搜索文件：可按路径/文件名和文本内容匹配关键词。path 可为绝对路径；相对路径以项目根目录为基准。",
         "parameters": {
             "type": "object",
             "properties": {
@@ -2266,7 +2542,7 @@ TOOL_SPECS: dict[str, dict] = {
                 },
                 "path": {
                     "type": "string",
-                    "description": "搜索起点，相对 workspace，默认 .",
+                    "description": "搜索起点，默认 .（项目根目录）",
                 },
                 "search_content": {
                     "type": "boolean",
@@ -2279,6 +2555,54 @@ TOOL_SPECS: dict[str, dict] = {
             },
             "required": ["keyword"],
         },
+    },
+    "edit_file": {
+        "description": "精确替换文件中的一段文本。old_text 必须在文件中唯一，否则设置 replace_all=true。会先请求用户授权。适合修改代码、配置和文档。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "文件路径，可为绝对路径",
+                },
+                "old_text": {
+                    "type": "string",
+                    "description": "要替换的原文；应包含足够上下文以保证唯一",
+                },
+                "new_text": {
+                    "type": "string",
+                    "description": "替换后的文本；删除内容时传空字符串",
+                },
+                "replace_all": {
+                    "type": "boolean",
+                    "description": "true 表示替换全部匹配，默认 false",
+                },
+            },
+            "required": ["path", "old_text", "new_text"],
+        },
+        "context": True,
+    },
+    "run_command": {
+        "description": "在本机 shell 中执行命令或代码，例如 python script.py、python -c \"...\"、node app.js、git status、dir。cwd 可为绝对路径；相对路径以项目根目录为基准。会先请求用户授权，超时后终止进程树。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "要执行的完整命令；不要传交互式命令",
+                },
+                "cwd": {
+                    "type": "string",
+                    "description": "工作目录，默认项目根目录；可传绝对路径",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "description": "超时秒数，默认 120，最大 600",
+                },
+            },
+            "required": ["command"],
+        },
+        "context": True,
     },
     "remember": {
         "description": "保存一条长期记忆（键值对），用于记住用户偏好、常用城市、任务结论等。注意：会话记忆只属于当前对话；全局记忆跨对话共享。",
@@ -2393,6 +2717,8 @@ TOOL_FUNCS: dict[str, Callable[..., str]] = {
     "read_file": read_file,
     "write_file": write_file,
     "search_files": search_files,
+    "edit_file": edit_file,
+    "run_command": run_command,
     "remember": remember,
     "recall": recall,
     "search_memory": search_memory,

@@ -858,6 +858,8 @@ a { color: var(--accent-dark); text-underline-offset: 3px; }
   font-size: 12px;
   line-height: 1.55;
   color: var(--ink-soft);
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 .permission-copy code {
   font-family: var(--mono);

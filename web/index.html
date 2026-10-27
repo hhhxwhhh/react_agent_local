@@ -74,6 +74,16 @@
             <button type="button" class="permission-deny" id="location-deny">拒绝</button>
           </div>
         </div>
+        <div class="permission-card" id="tool-permission" hidden>
+          <div class="permission-copy">
+            <strong id="tool-permission-title">工具权限请求</strong>
+            <span id="tool-permission-detail">Agent 想执行一项本机操作。</span>
+          </div>
+          <div class="permission-actions">
+            <button type="button" class="permission-allow" id="tool-allow">允许一次</button>
+            <button type="button" class="permission-deny" id="tool-deny">拒绝</button>
+          </div>
+        </div>
         <div class="composer-box">
           <textarea id="input" rows="1" placeholder="输入问题… Enter 发送，Shift+Enter 换行"></textarea>
           <button type="submit" class="send-btn" id="send" aria-label="发送">
@@ -82,7 +92,7 @@
           </button>
         </div>
         <div class="composer-hint">
-          <span>工具在本机执行 · 外部信息请自行甄别 · 定位需在工具调用时授权</span>
+          <span>工具在本机执行 · 外部信息请自行甄别 · 写文件/执行命令/定位需授权</span>
         </div>
       </form>
     </main>
@@ -118,6 +128,6 @@
   </aside>
 
   <div class="toast" id="toast"></div>
-  <script src="/static/app.js?v=20261024c"></script>
+  <script src="/static/app.js?v=20261027a"></script>
 </body>
 </html>

@@ -583,6 +583,91 @@ class TestServerApi(TempStoreCase):
             {"latitude": 30.2741, "longitude": 120.1551, "accuracy": 15},
         )
 
+    def test_tool_permission_allow_flow(self):
+        created = self.client.post("/api/sessions").json()
+        broker = server.ToolPermissionBroker(timeout=3)
+        events: list[dict] = []
+        captured: dict = {}
+
+        def worker() -> None:
+            captured["allowed"] = broker.request(
+                created["id"],
+                {
+                    "tool": "run_command",
+                    "title": "命令执行权限",
+                    "detail": "echo hello",
+                },
+                events.append,
+            )
+
+        thread = threading.Thread(target=worker)
+        with patch.object(server, "tool_permission_broker", broker):
+            thread.start()
+            deadline = time.time() + 2
+            while not events and time.time() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(events, "worker 应发出 tool_permission_request")
+            request = events[0]
+            self.assertEqual(request["type"], "tool_permission_request")
+            self.assertEqual(request["tool"], "run_command")
+            self.assertEqual(request["session_id"], created["id"])
+
+            response = self.client.post(
+                "/api/tool-permission",
+                json={
+                    "token": request["token"],
+                    "session_id": created["id"],
+                    "allowed": True,
+                },
+            )
+            thread.join(2)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["decision"], "allowed")
+        self.assertFalse(thread.is_alive())
+        self.assertTrue(captured["allowed"])
+
+    def test_tool_permission_deny_flow(self):
+        created = self.client.post("/api/sessions").json()
+        broker = server.ToolPermissionBroker(timeout=3)
+        events: list[dict] = []
+        captured: dict = {}
+
+        def worker() -> None:
+            captured["allowed"] = broker.request(
+                created["id"],
+                {"tool": "write_file", "title": "文件写入权限", "detail": "a.txt"},
+                events.append,
+            )
+
+        thread = threading.Thread(target=worker)
+        with patch.object(server, "tool_permission_broker", broker):
+            thread.start()
+            deadline = time.time() + 2
+            while not events and time.time() < deadline:
+                time.sleep(0.01)
+            response = self.client.post(
+                "/api/tool-permission",
+                json={
+                    "token": events[0]["token"],
+                    "session_id": created["id"],
+                    "allowed": False,
+                },
+            )
+            thread.join(2)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["decision"], "denied")
+        self.assertFalse(thread.is_alive())
+        self.assertFalse(captured["allowed"])
+
+    def test_tool_permission_rejects_expired_token(self):
+        response = self.client.post(
+            "/api/tool-permission",
+            json={"token": "x" * 20, "session_id": "y" * 32, "allowed": True},
+        )
+        self.assertEqual(response.status_code, 404)
+
     def test_location_permission_deny_flow(self):
         created = self.client.post("/api/sessions").json()
         broker = server.LocationPermissionBroker(timeout=3)

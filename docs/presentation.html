@@ -1,0 +1,584 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent 基础实验汇报：从 ReAct 论文到本地天气 Agent</title>
+  <style>
+    :root {
+      --surface: #fcfcfb;
+      --card: #ffffff;
+      --ink: #0b0b0b;
+      --ink-2: #52514e;
+      --muted: #898781;
+      --grid: #e1e0d9;
+      --blue: #2a78d6;
+      --blue-light: #cde2fb;
+      --orange: #eb6834;
+      --orange-light: #f6d3c5;
+      --aqua: #1baf7a;
+      --aqua-light: #d9f4ea;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      height: 100%;
+      margin: 0;
+      background: var(--surface);
+      color: var(--ink);
+      font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", system-ui, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    body { overflow: hidden; }
+
+    .progress {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 3px;
+      background: var(--grid);
+      z-index: 20;
+    }
+
+    .progress span {
+      display: block;
+      height: 100%;
+      width: 12.5%;
+      background: var(--blue);
+      transition: width .3s ease;
+    }
+
+    .deck { position: relative; height: 100vh; width: 100vw; overflow: hidden; }
+
+    .slide {
+      position: absolute;
+      inset: 0;
+      padding: 5.5vh 6.5vw 9vh;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      opacity: 0;
+      visibility: hidden;
+      transform: translateX(24px);
+      transition: opacity .32s ease, transform .32s ease, visibility .32s ease;
+      overflow-y: auto;
+    }
+
+    .slide.active {
+      opacity: 1;
+      visibility: visible;
+      transform: translateX(0);
+    }
+
+    .kicker {
+      color: var(--blue);
+      font-size: .82rem;
+      font-weight: 800;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+      margin-bottom: 1rem;
+    }
+
+    h1 {
+      margin: 0 0 1.2rem;
+      font-size: clamp(2.6rem, 4.4vw, 5rem);
+      line-height: 1.08;
+      letter-spacing: -.03em;
+    }
+
+    h2 {
+      margin: 0 0 .7rem;
+      font-size: clamp(1.8rem, 2.7vw, 3.1rem);
+      line-height: 1.15;
+      letter-spacing: -.02em;
+    }
+
+    h3 {
+      margin: 0 0 .45rem;
+      font-size: 1.03rem;
+      line-height: 1.35;
+    }
+
+    p { margin: 0; }
+
+    .subtitle {
+      max-width: 68ch;
+      color: var(--ink-2);
+      font-size: clamp(1rem, 1.25vw, 1.3rem);
+      line-height: 1.65;
+    }
+
+    .meta {
+      margin-top: 1.5rem;
+      color: var(--muted);
+      font-size: .95rem;
+    }
+
+    .mono {
+      font-family: Consolas, "SFMono-Regular", monospace;
+      font-size: .92em;
+      background: #f1f0eb;
+      border: 1px solid var(--grid);
+      border-radius: 6px;
+      padding: .08em .35em;
+      white-space: nowrap;
+    }
+
+    .grid { display: grid; gap: 2rem; }
+    .grid-2 { grid-template-columns: 1.12fr .88fr; align-items: center; }
+    .grid-3 { grid-template-columns: repeat(3, 1fr); align-items: stretch; }
+    .stack { display: grid; gap: 1rem; }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--grid);
+      border-radius: 18px;
+      padding: 1.15rem 1.25rem;
+      box-shadow: 0 10px 30px rgba(11, 11, 11, .045);
+    }
+
+    .card p, .card li {
+      color: var(--ink-2);
+      font-size: .94rem;
+      line-height: 1.6;
+    }
+
+    .card ul { margin: .35rem 0 0; padding-left: 1.1rem; }
+    .card li + li { margin-top: .35rem; }
+
+    .stat {
+      color: var(--blue);
+      font-size: clamp(1.9rem, 2.5vw, 2.8rem);
+      font-weight: 800;
+      line-height: 1;
+      letter-spacing: -.03em;
+      margin-bottom: .35rem;
+    }
+
+    .stat.orange { color: var(--orange); }
+    .stat.aqua { color: var(--aqua); }
+
+    .flow {
+      display: flex;
+      align-items: center;
+      gap: .65rem;
+      flex-wrap: wrap;
+    }
+
+    .step {
+      display: inline-flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: .55rem .9rem;
+      border-radius: 12px;
+      background: var(--card);
+      border: 1px solid var(--grid);
+      font-weight: 700;
+      font-size: .92rem;
+      line-height: 1.3;
+      text-align: center;
+      white-space: nowrap;
+    }
+
+    .step small {
+      display: block;
+      margin-top: .12rem;
+      color: var(--muted);
+      font-size: .7rem;
+      font-weight: 400;
+    }
+
+    .step.blue { border-color: var(--blue); background: #f2f8ff; color: var(--blue); }
+    .step.aqua { border-color: var(--aqua); background: var(--aqua-light); color: #0c6b4c; }
+    .step.orange { border-color: var(--orange); background: var(--orange-light); color: #9d3d18; }
+    .arrow { color: var(--muted); font-size: 1.25rem; font-weight: 700; }
+
+    .figure {
+      display: block;
+      width: 100%;
+      max-height: 60vh;
+      object-fit: contain;
+      border: 1px solid var(--grid);
+      border-radius: 14px;
+      background: #fff;
+    }
+
+    .caption {
+      margin-top: .65rem;
+      color: var(--muted);
+      font-size: .8rem;
+      line-height: 1.5;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: var(--card);
+      border: 1px solid var(--grid);
+      border-radius: 14px;
+      overflow: hidden;
+    }
+
+    th, td {
+      text-align: left;
+      padding: .7rem .8rem;
+      border-bottom: 1px solid var(--grid);
+      font-size: .88rem;
+      line-height: 1.45;
+      vertical-align: top;
+    }
+
+    th {
+      color: var(--muted);
+      font-weight: 700;
+      background: #f7f6f2;
+    }
+
+    tr:last-child td { border-bottom: 0; }
+
+    .quote {
+      font-size: clamp(1.7rem, 2.6vw, 2.9rem);
+      line-height: 1.3;
+      font-weight: 800;
+      letter-spacing: -.02em;
+      max-width: 24ch;
+    }
+
+    .accent-blue { color: var(--blue); }
+    .accent-orange { color: var(--orange); }
+    .accent-aqua { color: var(--aqua); }
+
+    .note {
+      border-left: 3px solid var(--blue);
+      padding-left: .9rem;
+      color: var(--ink-2);
+      font-size: .9rem;
+      line-height: 1.6;
+    }
+
+    .footer {
+      position: fixed;
+      left: 6.5vw;
+      right: 6.5vw;
+      bottom: 2.8vh;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      color: var(--muted);
+      font-size: .78rem;
+      z-index: 10;
+      pointer-events: none;
+    }
+
+    .footer .brand { letter-spacing: .08em; text-transform: uppercase; }
+
+    .hint {
+      position: fixed;
+      left: 50%;
+      bottom: 2.8vh;
+      transform: translateX(-50%);
+      color: var(--muted);
+      font-size: .78rem;
+      z-index: 10;
+      pointer-events: none;
+    }
+
+    @media (max-width: 980px) {
+      .grid-2, .grid-3 { grid-template-columns: 1fr; }
+      .slide { padding: 5vh 6vw 10vh; }
+      .figure { max-height: 42vh; }
+      .hint { display: none; }
+    }
+
+    @media print {
+      body { overflow: visible; background: #fff; }
+      .progress, .hint, .footer { display: none; }
+      .deck { height: auto; }
+      .slide {
+        position: relative;
+        opacity: 1;
+        visibility: visible;
+        transform: none;
+        page-break-after: always;
+        min-height: 100vh;
+        overflow: visible;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="progress"><span id="bar"></span></div>
+
+  <main class="deck">
+    <!-- 1. 标题 -->
+    <section class="slide active">
+      <div class="kicker">Agent 基础 · 实验汇报</div>
+      <div class="grid grid-2">
+        <div>
+          <h1>从 ReAct 论文<br>到本地天气 Agent</h1>
+          <p class="subtitle">
+            不依赖 LangChain，手写
+            <span class="mono">Thought → Action → Observation</span>
+            循环，调用真实 API 完成任务。
+          </p>
+          <div class="meta">王旭帆 · 2026-10-26</div>
+          <div class="flow" style="margin-top:2rem">
+            <span class="step blue">Thought</span>
+            <span class="arrow">→</span>
+            <span class="step blue">Action</span>
+            <span class="arrow">→</span>
+            <span class="step aqua">Observation</span>
+            <span class="arrow">→</span>
+            <span class="step aqua">Final Answer</span>
+          </div>
+        </div>
+        <div class="stack">
+          <div class="card"><div class="stat">21</div><p>本地工具</p></div>
+          <div class="card"><div class="stat aqua">133</div><p>离线测试</p></div>
+          <div class="card"><div class="stat orange">2</div><p>次模型调用完成天气任务</p></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 2. 论文 -->
+    <section class="slide">
+      <div class="kicker">01 · ReAct 论文</div>
+      <h2>让推理和行动交替</h2>
+      <p class="subtitle">
+        Yao et al., <em>ReAct: Synergizing Reasoning and Acting in Language Models</em>,
+        arXiv:2210.03629 (ICLR 2023)
+      </p>
+
+      <div class="flow" style="margin-top:2rem">
+        <span class="step blue">Thought<small>我现在要做什么</small></span>
+        <span class="arrow">→</span>
+        <span class="step blue">Action<small>调用哪个工具</small></span>
+        <span class="arrow">→</span>
+        <span class="step aqua">Observation<small>环境返回什么</small></span>
+        <span class="arrow">→</span>
+        <span class="step aqua">Final Answer<small>信息足够，收口</small></span>
+      </div>
+
+      <div class="grid grid-3" style="margin-top:2rem">
+        <div class="card">
+          <h3>CoT</h3>
+          <p>只有推理，没有外部反馈。推理再长，也拿不到实时天气。</p>
+        </div>
+        <div class="card">
+          <h3>Act-only</h3>
+          <p>只有动作，没有高层规划。会调工具，但容易选错、停不下来。</p>
+        </div>
+        <div class="card" style="border-color:var(--blue)">
+          <h3 class="accent-blue">ReAct</h3>
+          <p>推理指导动作，观察修正推理。既有规划，也有真实反馈。</p>
+        </div>
+      </div>
+
+      <p class="note" style="margin-top:1.6rem">
+        对应到实现：协议、执行、回填、收口。模型只负责决定下一步，真正的执行在本地代码。
+      </p>
+    </section>
+
+    <!-- 3. 架构 -->
+    <section class="slide">
+      <div class="kicker">02 · 系统设计</div>
+      <h2>总体架构</h2>
+      <div class="grid grid-2" style="margin-top:1.2rem">
+        <div>
+          <img class="figure" src="figures/fig1_architecture.png" alt="系统总体架构">
+          <p class="caption">图1：循环、工具、记忆与 Web 服务的总体关系。</p>
+        </div>
+        <div class="stack">
+          <div class="card">
+            <h3>策略模型</h3>
+            <p>DeepSeek <span class="mono">deepseek-chat</span>，固定策略，负责生成下一步动作。</p>
+          </div>
+          <div class="card">
+            <h3>ReAct 循环</h3>
+            <p><span class="mono">agent.py</span>：解析 → 执行 → 回填 → 再推理。</p>
+          </div>
+          <div class="card">
+            <h3>工具层</h3>
+            <p><span class="mono">tools.py</span>：21 个工具，统一走 <span class="mono">run_tool</span>。</p>
+          </div>
+          <div class="card">
+            <h3>外部 API 与交互</h3>
+            <p>Open-Meteo 天气/空气质量；CLI + 本地 Web。</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 4. 工具接入 -->
+    <section class="slide">
+      <div class="kicker">02 · 系统设计</div>
+      <h2>工具接入：一个函数 + 一份 schema + 一次注册</h2>
+      <div class="grid grid-2" style="margin-top:1.2rem">
+        <div>
+          <img class="figure" src="figures/fig6_tool_integration.png" alt="工具接入与执行链路">
+          <p class="caption">图6：从函数、schema、注册到 run_tool 和 Observation 的完整链路。</p>
+        </div>
+        <div class="stack">
+          <div class="card">
+            <h3>1. 函数</h3>
+            <p>普通 Python 函数。只返回字符串，失败抛异常，不控制循环。</p>
+          </div>
+          <div class="card">
+            <h3>2. Schema</h3>
+            <p>JSON Schema 描述参数；<span class="mono">describe_tools()</span> 注入 system prompt。</p>
+          </div>
+          <div class="card">
+            <h3>3. 注册</h3>
+            <p><span class="mono">TOOL_FUNCS</span> 注册；<span class="mono">run_tool</span> 统一校验、执行、截断。</p>
+          </div>
+          <p class="note">
+            保护：重复调用拦截 · 连续格式错误收口 · MAX_STEPS=8 ·
+            <span class="mono">stop=["Observation:"]</span>
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 5. 对照实验 -->
+    <section class="slide">
+      <div class="kicker">03 · 实验结果</div>
+      <h2>同一个问题，两种结果</h2>
+      <img class="figure" src="figures/fig8_react_vs_direct.png" alt="Direct LLM 与 ReAct Agent 对照" style="max-height:56vh; margin-top:1rem">
+      <div class="grid grid-3" style="margin-top:1rem">
+        <div class="card"><div class="stat orange">42</div><p>Direct tokens · 只能拒答</p></div>
+        <div class="card"><div class="stat">8,135</div><p>ReAct tokens · 2 次调用</p></div>
+        <div class="card"><div class="stat aqua">实时</div><p>Open-Meteo 观测 · 可给建议</p></div>
+      </div>
+      <p class="caption">ReAct 不是更省，而是能完成 Direct LLM 完成不了的任务。</p>
+    </section>
+
+    <!-- 6. 多工具任务 -->
+    <section class="slide">
+      <div class="kicker">03 · 实验结果</div>
+      <h2>多工具任务：从问答到做事</h2>
+      <p class="subtitle" style="margin-bottom:1.2rem">
+        “查一下北京现在的天气和空气质量，整理成简报，保存到文件。”
+      </p>
+      <div class="grid grid-2">
+        <div>
+          <table>
+            <thead>
+              <tr><th>轮次</th><th>Action</th><th>Observation</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>1</td><td><span class="mono">get_weather</span></td><td>15.3°C，大部晴朗，降水概率 100%</td></tr>
+              <tr><td>2</td><td><span class="mono">get_air_quality</span></td><td>US AQI 168（不健康），PM2.5 22.6</td></tr>
+              <tr><td>3</td><td><span class="mono">write_file</span></td><td>写入 641 字符，1112 字节</td></tr>
+              <tr><td>4</td><td><span class="mono">Final Answer</span></td><td>汇总天气、空气质量与提示</td></tr>
+            </tbody>
+          </table>
+          <p class="caption">自动化测试：133 个用例，132 通过，1 跳过（Windows 符号链接权限）。</p>
+        </div>
+        <div class="stack">
+          <div class="card"><div class="stat">4</div><p>轮 ReAct 调用</p></div>
+          <div class="card"><div class="stat">17,591</div><p>tokens</p></div>
+          <div class="card"><div class="stat aqua">✓</div><p><span class="mono">workspace/demo/beijing_brief.md</span></p></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 7. 分析 -->
+    <section class="slide">
+      <div class="kicker">04 · 分析</div>
+      <h2>为什么有效，代价是什么</h2>
+      <div class="grid grid-2" style="margin-top:1.2rem">
+        <div class="stack">
+          <div class="card"><h3>接地</h3><p>实时信息来自工具，不靠模型记忆。</p></div>
+          <div class="card"><h3>可观察</h3><p>Thought / Action / Observation 全程可见。</p></div>
+          <div class="card"><h3>错误恢复</h3><p>工具异常变成 Observation，模型可以换参数或换工具。</p></div>
+          <div class="card"><h3>可组合</h3><p>新增工具不需要改循环。</p></div>
+        </div>
+        <div class="card" style="border-color:var(--orange)">
+          <h3 class="accent-orange">代价与边界</h3>
+          <ul>
+            <li>Token 和延迟更高：2 次调用、8135 tokens。</li>
+            <li>模型可能不按格式输出，需要解析器和收口。</li>
+            <li>可能重复调用、选错工具，需要拦截和评测。</li>
+            <li>外部 API 可能失败，需要异常转 Observation。</li>
+            <li>这是机制复现，不是论文指标复现；没有 benchmark。</li>
+            <li>21 个工具扩大了动作空间，工具选择本身是混淆变量。</li>
+            <li>文件与命令工具开放本机访问，靠逐次用户授权约束，不是权限沙箱。</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- 8. 结论 -->
+    <section class="slide">
+      <div class="kicker">05 · 结论</div>
+      <p class="quote">
+        ReAct 不是一个模型能力，<br>
+        而是一套<span class="accent-blue">工程循环</span>。
+      </p>
+      <p class="subtitle" style="margin-top:1.2rem">
+        模型负责决定下一步；真正的能力来自工具、观测和约束。
+      </p>
+      <div class="grid grid-3" style="margin-top:2rem">
+        <div class="card">
+          <h3>01 · 最小动作空间</h3>
+          <p>收敛到 <span class="mono">search / fetch / finish</span>，和论文设定对齐。</p>
+        </div>
+        <div class="card">
+          <h3>02 · 任务级评测</h3>
+          <p>对比 Direct / CoT / Act-only / ReAct，记录成功率、步数、时延和 token。</p>
+        </div>
+        <div class="card">
+          <h3>03 · 接口对照</h3>
+          <p>比较文本协议与原生 function calling，理解两种 Action 接口。</p>
+        </div>
+      </div>
+      <p class="meta" style="margin-top:2rem">谢谢 · Q&amp;A</p>
+    </section>
+  </main>
+
+  <div class="footer">
+    <span class="brand">Agent 基础 · ReAct</span>
+    <span id="page">1 / 8</span>
+  </div>
+  <div class="hint">← → 翻页 · F11 全屏</div>
+
+  <script>
+    const slides = [...document.querySelectorAll('.slide')];
+    const bar = document.getElementById('bar');
+    const page = document.getElementById('page');
+    let index = 0;
+
+    function show(next) {
+      index = Math.max(0, Math.min(slides.length - 1, next));
+      slides.forEach((slide, i) => slide.classList.toggle('active', i === index));
+      bar.style.width = ((index + 1) / slides.length * 100) + '%';
+      page.textContent = (index + 1) + ' / ' + slides.length;
+    }
+
+    document.addEventListener('keydown', (event) => {
+      if (['ArrowRight', 'ArrowDown', ' ', 'PageDown'].includes(event.key)) {
+        event.preventDefault();
+        show(index + 1);
+      }
+      if (['ArrowLeft', 'ArrowUp', 'PageUp'].includes(event.key)) {
+        event.preventDefault();
+        show(index - 1);
+      }
+      if (event.key === 'Home') show(0);
+      if (event.key === 'End') show(slides.length - 1);
+    });
+
+    document.addEventListener('click', (event) => {
+      if (event.clientX > window.innerWidth * 0.78) show(index + 1);
+      if (event.clientX < window.innerWidth * 0.22) show(index - 1);
+    });
+
+    const start = Number(new URLSearchParams(location.search).get('slide') || '1');
+    show(Number.isFinite(start) ? start - 1 : 0);
+  </script>
+</body>
+</html>

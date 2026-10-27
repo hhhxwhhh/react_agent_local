@@ -31,6 +31,8 @@ from config import (
     LOCATION_PERMISSION_TIMEOUT,
     MAX_CONCURRENT_RUNS,
     MAX_STEPS,
+    REQUIRE_TOOL_APPROVAL,
+    TOOL_PERMISSION_TIMEOUT,
 )
 from llm import DeepSeekLLM, LLMError
 from memory import GLOBAL_MEMORY_FILE, JsonMemory, format_memory_context
@@ -149,7 +151,90 @@ class LocationPermissionBroker:
         return "allowed" if allowed else "denied"
 
 
+class ToolPermissionBroker:
+    """把“写文件/执行命令前确认”变成一次可响应的授权请求。
+
+    worker 线程调用 request()，通过 SSE 发出一次性 token 并阻塞；
+    前端点击允许或拒绝后 POST 回 token，resolve() 唤醒 worker。
+    超时、拒绝或取消都返回 False。
+    """
+
+    def __init__(self, timeout: float = TOOL_PERMISSION_TIMEOUT) -> None:
+        self.timeout = max(1.0, float(timeout))
+        self._pending: dict[str, dict] = {}
+        self._lock = threading.Lock()
+
+    def request(
+        self,
+        session_id: str,
+        payload: dict,
+        emit,
+        cancel_event: threading.Event | None = None,
+    ) -> bool:
+        token = secrets.token_urlsafe(18)
+        pending = {
+            "session_id": session_id,
+            "event": threading.Event(),
+            "decided": False,
+            "allowed": False,
+        }
+        with self._lock:
+            self._pending[token] = pending
+
+        event = dict(payload)
+        event.update(
+            {
+                "type": "tool_permission_request",
+                "session_id": session_id,
+                "token": token,
+                "timeout": int(self.timeout),
+            }
+        )
+        emit(event)
+
+        deadline = time.monotonic() + self.timeout
+        try:
+            while time.monotonic() < deadline:
+                if pending["event"].wait(0.2):
+                    break
+                if cancel_event is not None and cancel_event.is_set():
+                    break
+        finally:
+            with self._lock:
+                self._pending.pop(token, None)
+            if pending["decided"]:
+                reason = "allowed" if pending["allowed"] else "denied"
+            elif cancel_event is not None and cancel_event.is_set():
+                reason = "cancelled"
+            else:
+                reason = "timeout"
+            emit(
+                {
+                    "type": "tool_permission_closed",
+                    "token": token,
+                    "reason": reason,
+                }
+            )
+
+        if cancel_event is not None and cancel_event.is_set():
+            return False
+        return bool(pending["allowed"])
+
+    def resolve(self, token: str, session_id: str, allowed: bool) -> str:
+        with self._lock:
+            pending = self._pending.get(token)
+            if pending is None or pending["session_id"] != session_id:
+                raise KeyError("授权请求不存在或已过期")
+            if pending["decided"]:
+                raise RuntimeError("该授权请求已处理")
+            pending["decided"] = True
+            pending["allowed"] = bool(allowed)
+            pending["event"].set()
+        return "allowed" if allowed else "denied"
+
+
 location_broker = LocationPermissionBroker()
+tool_permission_broker = ToolPermissionBroker()
 
 
 # ---------------------------------------------------------------------------
@@ -181,6 +266,14 @@ class LocationDecision(BaseModel):
     latitude: float | None = Field(default=None, ge=-90, le=90)
     longitude: float | None = Field(default=None, ge=-180, le=180)
     accuracy: float | None = Field(default=None, ge=0, le=100000)
+
+
+class ToolDecision(BaseModel):
+    """前端对 tool_permission_request 的回应。"""
+
+    token: str = Field(min_length=8, max_length=128)
+    session_id: str = Field(min_length=1, max_length=64)
+    allowed: bool
 
 
 class RenameRequest(BaseModel):
@@ -285,6 +378,20 @@ def location_permission(body: LocationDecision) -> dict:
         raise HTTPException(status_code=409, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True, "decision": decision}
+
+
+@app.post("/api/tool-permission")
+def tool_permission(body: ToolDecision) -> dict:
+    """前端授权结果：允许或拒绝一次写文件/编辑文件/执行命令。"""
+    try:
+        decision = tool_permission_broker.resolve(
+            body.token, body.session_id, body.allowed
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc.args[0]))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     return {"ok": True, "decision": decision}
 
 
@@ -396,6 +503,12 @@ def chat(body: ChatRequest) -> StreamingResponse:
         # 在工具线程里阻塞，直到前端授权、拒绝、超时或本轮被取消。
         return location_broker.request(session_id, on_event, cancel_event)
 
+    def request_tool_permission(payload: dict) -> bool:
+        # 写文件、编辑文件、执行命令前，等待前端点击“允许一次”。
+        return tool_permission_broker.request(
+            session_id, payload, on_event, cancel_event
+        )
+
     def worker() -> None:
         try:
             llm = DeepSeekLLM()
@@ -405,6 +518,9 @@ def chat(body: ChatRequest) -> StreamingResponse:
                 default_scope="session",
                 user_location=user_location,
                 request_user_location=request_user_location,
+                request_tool_permission=(
+                    request_tool_permission if REQUIRE_TOOL_APPROVAL else None
+                ),
             )
             agent = ReActAgent(
                 llm=llm,

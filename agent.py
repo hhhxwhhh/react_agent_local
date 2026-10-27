@@ -30,6 +30,7 @@ from config import (
     HISTORY_KEEP_MESSAGES,
     HISTORY_SUMMARY_BATCH_MESSAGES,
     MAX_STEPS,
+    REQUIRE_TOOL_APPROVAL,
 )
 from llm import DeepSeekLLM, LLMError
 from memory import GLOBAL_MEMORY_FILE, JsonMemory, format_memory_context
@@ -40,7 +41,13 @@ from tools import TOOL_SPECS, forget_memory, run_tool
 STOP_SEQUENCES = ["Observation:", "Observation："]
 
 # 这些工具会改变外部状态；调用后清空“已见调用”，允许模型重新读取变化后的结果。
-STATE_CHANGING_TOOLS = {"write_file", "remember", "forget"}
+STATE_CHANGING_TOOLS = {
+    "write_file",
+    "edit_file",
+    "run_command",
+    "remember",
+    "forget",
+}
 # 连续两次被判定为重复调用，或连续三次格式错误后，提前收口。
 MAX_CONSECUTIVE_DUPLICATES = 2
 MAX_CONSECUTIVE_INVALID = 3
@@ -1050,6 +1057,15 @@ def _check_tools() -> int:
             {"path": "demo/tool_check.txt", "content": "本地 ReAct Agent 工具检查通过。\n"},
         ),
         ("read_file", {"path": "demo/tool_check.txt"}),
+        (
+            "edit_file",
+            {
+                "path": "demo/tool_check.txt",
+                "old_text": "工具检查通过",
+                "new_text": "工具检查通过（edit）",
+            },
+        ),
+        ("run_command", {"command": "echo react-agent-ok", "cwd": "demo"}),
         ("search_files", {"keyword": "工具检查", "path": "demo"}),
         ("list_files", {"path": "demo"}),
         ("remember", {"key": "_self_check", "value": "工具检查通过"}),
@@ -1093,18 +1109,42 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--temperature", type=float, default=0.2, help="采样温度")
     parser.add_argument("--no-color", action="store_true", help="关闭彩色输出")
     parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="自动允许写文件、编辑文件和执行命令（高风险，仅限受信任任务）",
+    )
+    parser.add_argument(
         "--check-tools", action="store_true", help="只检查本地工具，不需要 API Key"
     )
     return parser
 
 
+def _confirm_tool_permission(payload: dict) -> bool:
+    """CLI 下在终端确认写文件、编辑文件或执行命令。"""
+    title = str(payload.get("title") or "工具权限请求")
+    detail = str(payload.get("detail") or "")
+    print(_yellow(f"\n[需要授权] {title}"))
+    if detail:
+        print(detail)
+    try:
+        answer = input("允许执行？[y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+    return answer in {"y", "yes"}
+
+
 def _make_agent(args: argparse.Namespace, use_color: bool) -> ReActAgent:
     llm = DeepSeekLLM(model=args.model, temperature=args.temperature)
+    context = ToolContext(default_scope="global")
+    if REQUIRE_TOOL_APPROVAL and not getattr(args, "yes", False):
+        context.request_tool_permission = _confirm_tool_permission
     return ReActAgent(
         llm=llm,
         max_steps=args.max_steps,
         verbose=True,
         use_color=use_color,
+        tool_context=context,
         default_memory_scope="global",
     )
 
@@ -1122,8 +1162,9 @@ def _show_memories() -> None:
 def _repl(agent: ReActAgent) -> int:
     print(_bold("\n本地 ReAct Agent（DeepSeek）"))
     print("工具：天气 / 空气质量 / 必应搜索 / 网页抓取 / 时间 / 日期计算")
-    print("      单位换算 / 本地文件 / 文件搜索 / 长期记忆 / 汇率 / 计算器")
+    print("      单位换算 / 本机文件 / 文件搜索 / 命令执行 / 长期记忆 / 汇率 / 计算器")
     print("输入问题开始；exit 退出，:help 查看帮助")
+    print("写文件、编辑文件、执行命令前会在终端请求确认；--yes 可跳过。")
     print("=" * 60)
 
     history: list[dict] = []

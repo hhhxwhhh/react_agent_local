@@ -25,16 +25,19 @@ from agent import (  # noqa: E402
     parse_action_input,
     parse_output,
 )
+from tool_context import ToolContext  # noqa: E402
 from tools import (  # noqa: E402
     WORKSPACE_DIR,
     calculate,
     convert_units,
     date_calc,
+    edit_file,
     get_current_time,
     list_files,
     read_file,
     recall,
     remember,
+    run_command,
     run_tool,
     search_files,
     write_file,
@@ -266,7 +269,8 @@ class TestTools(unittest.TestCase):
 class TestFileTools(unittest.TestCase):
     def setUp(self):
         self.folder = f"_test_{uuid.uuid4().hex[:8]}"
-        self.directory = WORKSPACE_DIR / self.folder
+        # 默认 FILE_ACCESS_MODE=unrestricted，相对路径以项目根目录解析。
+        self.directory = Path(__file__).resolve().parents[1] / self.folder
 
     def tearDown(self):
         shutil.rmtree(self.directory, ignore_errors=True)
@@ -287,13 +291,64 @@ class TestFileTools(unittest.TestCase):
         write_file(f"{self.folder}/log.txt", "B", append=True)
         self.assertIn("AB", read_file(f"{self.folder}/log.txt"))
 
-    def test_workspace_escape_blocked(self):
+    def test_workspace_mode_escape_blocked(self):
+        with patch.object(tools, "FILE_ACCESS_MODE", "workspace"):
+            with self.assertRaises(ValueError):
+                read_file("../agent.py")
+            with self.assertRaises(ValueError):
+                write_file("../evil.txt", "x")
+            with self.assertRaises(ValueError):
+                search_files("x", "../")
+
+    def test_unrestricted_mode_allows_absolute_path_outside_workspace(self):
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp) / "outside.txt"
+            write_file(str(target), "outside-ok")
+            self.assertIn("outside-ok", read_file(str(target)))
+            self.assertIn("outside.txt", list_files(temp))
+
+    def test_edit_file_replaces_unique_text(self):
+        write_file(f"{self.folder}/edit.txt", "alpha\nbeta\ngamma")
+        result = edit_file(f"{self.folder}/edit.txt", "beta", "BETA")
+        self.assertIn("替换 1 处", result)
+        self.assertIn("BETA", read_file(f"{self.folder}/edit.txt"))
         with self.assertRaises(ValueError):
-            read_file("../agent.py")
+            edit_file(f"{self.folder}/edit.txt", "missing", "x")
+
+    def test_edit_file_requires_unique_match(self):
+        write_file(f"{self.folder}/dup.txt", "x x")
         with self.assertRaises(ValueError):
-            write_file("../evil.txt", "x")
-        with self.assertRaises(ValueError):
-            search_files("x", "../")
+            edit_file(f"{self.folder}/dup.txt", "x", "y")
+        edit_file(f"{self.folder}/dup.txt", "x", "y", replace_all=True)
+        self.assertIn("y y", read_file(f"{self.folder}/dup.txt"))
+
+    def test_permission_denial_blocks_write_and_command(self):
+        self.directory.mkdir(parents=True, exist_ok=True)
+        context = ToolContext(request_tool_permission=lambda payload: False)
+        denied = run_tool(
+            "write_file",
+            {"path": f"{self.folder}/denied.txt", "content": "no"},
+            context=context,
+        )
+        self.assertTrue(denied.startswith("ERROR"))
+        self.assertIn("拒绝", denied)
+        self.assertFalse((self.directory / "denied.txt").exists())
+
+        denied_command = run_tool(
+            "run_command", {"command": "echo should-not-run"}, context=context
+        )
+        self.assertTrue(denied_command.startswith("ERROR"))
+
+    def test_permission_allow_runs_command(self):
+        self.directory.mkdir(parents=True, exist_ok=True)
+        context = ToolContext(request_tool_permission=lambda payload: True)
+        result = run_tool(
+            "run_command",
+            {"command": "echo permission-ok", "cwd": str(self.directory)},
+            context=context,
+        )
+        self.assertIn("permission-ok", result)
+        self.assertIn("退出码：0", result)
 
     def test_search_files_by_content_and_name(self):
         write_file(f"{self.folder}/docs/weather.md", "上海今天有雨\nPM2.5 良好")
@@ -309,17 +364,20 @@ class TestFileTools(unittest.TestCase):
         self.assertIn("没有找到", missing)
 
     def test_search_does_not_follow_symlink_outside_workspace(self):
-        self.directory.mkdir(parents=True, exist_ok=True)
+        workspace_dir = WORKSPACE_DIR / self.folder
+        workspace_dir.mkdir(parents=True, exist_ok=True)
+        self.addCleanup(shutil.rmtree, workspace_dir, True)
         with tempfile.TemporaryDirectory() as temp:
             outside = Path(temp) / "outside.txt"
             outside.write_text("TOPSECRET", encoding="utf-8")
-            link = self.directory / "link.txt"
+            link = workspace_dir / "link.txt"
             try:
                 link.symlink_to(outside)
             except (OSError, NotImplementedError):
                 self.skipTest("当前系统不允许创建符号链接")
 
-            result = search_files("TOPSECRET", self.folder)
+            with patch.object(tools, "FILE_ACCESS_MODE", "workspace"):
+                result = search_files("TOPSECRET", str(workspace_dir))
             self.assertNotIn("TOPSECRET", result)
             self.assertNotIn("link.txt", result)
 

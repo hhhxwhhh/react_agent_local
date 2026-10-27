@@ -6,8 +6,9 @@
 
 一个**不依赖 LangChain / LlamaIndex**、完全手写的本地 ReAct 智能体。
 它用 DeepSeek 作为“大脑”，通过 **Thought → Action → Observation** 循环调用本地工具，
-完成天气/空气质量查询、知识问答、网页阅读、日期与单位计算、本地文件操作、
-长期记忆等任务。
+完成天气/空气质量查询、知识问答、网页阅读、日期与单位计算、本机文件读写与编辑、
+命令/代码执行、长期记忆等任务。写文件、编辑文件和执行命令前会请求用户授权，
+行为接近一个小型的本地 Claude Code。
 
 - 论文：*ReAct: Synergizing Reasoning and Acting in Language Models*
   （Yao et al., 2022，[arXiv:2210.03629](https://arxiv.org/abs/2210.03629)）
@@ -35,7 +36,7 @@
 | 实时汇率 | open.er-api.com 公开 API | 不需要 |
 | 精确定位 | 浏览器 Geolocation API（用户授权）+ OpenStreetMap Nominatim 反向地理编码 | 不需要 |
 | 大致位置 | ipwho.is / ipapi.co 公网 IP 定位（未授权 GPS 时的回退） | 不需要 |
-| 计算、日期、单位、文件、记忆 | 本地实现 | 不需要 |
+| 计算、日期、单位、文件、命令、记忆 | 本地实现 | 不需要 |
 | 向量记忆索引 | SQLite + 本地特征哈希 | 不需要 |
 
 DeepSeek Key 申请：<https://platform.deepseek.com/api_keys>
@@ -88,6 +89,17 @@ SEMANTIC_RERANK_MIN_ENTRIES=6
 
 # 工具触发定位时，等待用户点击授权的秒数
 LOCATION_PERMISSION_TIMEOUT=90
+
+# 文件与命令执行（默认允许访问本机任意路径）
+# unrestricted：绝对路径均可访问；workspace：退回旧的文件沙箱
+FILE_ACCESS_MODE=unrestricted
+# FILE_ROOT=             # 相对路径的基准目录，默认项目根目录
+# 写文件/编辑文件/执行命令前是否需要用户确认
+REQUIRE_TOOL_APPROVAL=true
+TOOL_PERMISSION_TIMEOUT=120
+# 单次命令超时（秒）与输出截断长度
+COMMAND_TIMEOUT=120
+COMMAND_MAX_OUTPUT_CHARS=12000
 ```
 
 也可以不用 `.env`，直接设置环境变量：
@@ -136,6 +148,9 @@ python server.py --port 8080 --no-browser
 - 右下角“记忆管理”抽屉：查看/删除本会话记忆与全局记忆，过期条目会标记；
 - 定位按需授权：模型调用 `get_location` 时，输入框上方弹出权限卡片；
   允许后使用浏览器 GPS，拒绝或超时则回退到公网 IP 的城市级估算；
+- 本机操作按需授权：模型调用 `write_file` / `edit_file` / `run_command` 时，
+  卡片会显示目标路径或完整命令，可选择「允许一次」或「拒绝」；拒绝后工具返回
+  失败 Observation，模型不会绕过；
 - 回答支持 Markdown（代码块、列表、粗体、链接）；
 - 上下文过长时自动压缩：单轮轨迹保留最近步骤原文，较早步骤变成摘要；
   跨轮历史把较早对话增量摘要后写入会话文件，而不是简单丢弃；
@@ -159,7 +174,9 @@ python agent.py "距离 2027 年元旦还有多少天？"
 python agent.py "把北京天气和汇率信息整理成简报，保存到 notes/brief.md"
 python agent.py "100 华氏度是多少摄氏度？5 公里等于多少英里？"
 python agent.py "记住我的常用城市是杭州；以后查天气默认用它"
-python agent.py "在 workspace 里搜索提到 ReAct 的文件"
+python agent.py "在项目里搜索提到 ReAct 的文件"
+python agent.py "读取 E:\react_agent\README.md，把其中工具数量改成 21"
+python agent.py "写一个 Python 脚本计算前 20 个斐波那契数，运行并告诉我结果"
 ```
 
 交互模式：
@@ -185,7 +202,13 @@ CLI 交互模式会在当前进程内保留最近 10 轮对话，并支持：
 
 ```bash
 python agent.py --max-steps 10 --model deepseek-chat --no-color "问题"
+# 信任当前任务时跳过写文件/改文件/执行命令的终端确认
+python agent.py --yes "重构 demo/ 下的脚本并运行测试"
 ```
+
+CLI 在 `write_file` / `edit_file` / `run_command` 前会打印目标路径或完整命令，
+并等待 `y/N`；输入非 `y`、直接回车、`Ctrl+C` 或 `Ctrl+D` 都按拒绝处理。
+`--yes` 只跳过工具授权，不影响 `get_location` 的定位授权流程。
 
 ---
 
@@ -259,10 +282,12 @@ Question ───────>│  DeepSeek（system + scratchpad）│
 | `geo_lookup` | `operation`, `latitude`, `longitude`, `query`, `origin`, `destination`, `limit` | 坐标与地名互转：`reverse` 坐标→地址，`forward` 地名→坐标候选，`distance` 本地算直线距离/方位角/中点。不需要额外 Key |
 | `date_calc` | `operation`, `start_date`, `end_date`, `days` | 日期差、日期加减、星期/ISO 周/年内天数/闰年 |
 | `convert_units` | `value`, `from_unit`, `to_unit` | 长度、质量、温度、面积、体积、速度换算，支持“公里/英里”“摄氏度/华氏度”等中英文写法 |
-| `list_files` | `path`, `recursive` | 列出 workspace 沙箱内的文件和目录 |
-| `read_file` | `path`, `max_chars` | 读取 workspace 内的文本文件（UTF-8/GB18030） |
-| `write_file` | `path`, `content`, `append` | 在 workspace 内写入或追加文本文件 |
-| `search_files` | `keyword`, `path`, `search_content`, `max_results` | 按路径/文件名或文件内容搜索 workspace |
+| `list_files` | `path`, `recursive`, `max_entries` | 列出本机任意目录；相对路径以项目根目录为基准 |
+| `read_file` | `path`, `max_chars` | 读取本机文本文件（UTF-8/GB18030，最大 5 MB） |
+| `write_file` | `path`, `content`, `append` | 写入或追加文本文件，自动创建父目录；需授权 |
+| `edit_file` | `path`, `old_text`, `new_text`, `replace_all` | 精确替换文件片段；`old_text` 必须唯一，否则报错；需授权 |
+| `search_files` | `keyword`, `path`, `search_content`, `max_results` | 按路径/文件名或文件内容搜索本机目录 |
+| `run_command` | `command`, `cwd`, `timeout` | 执行 shell 命令或脚本；自动选择 Git Bash/PowerShell；需授权 |
 | `remember` | `key`, `value`, `scope`, `ttl_days` | 保存记忆。`scope=session` 只属于当前对话；`scope=global` 跨对话共享；`ttl_days` 可设置有效期 |
 | `recall` | `key`, `scope` | 读取记忆；省略 key 时列出全部 |
 | `search_memory` | `query`, `scope`, `limit` | 语义/关键词混合检索记忆；`scope=all` 同时查会话与全局 |
@@ -275,15 +300,50 @@ Question ───────>│  DeepSeek（system + scratchpad）│
 `[外部资料开始 … 外部资料结束]` 标记里，提示词明确要求模型把标记内文字
 当作数据而不是指令。这只是降低提示词注入风险，不是完整的安全隔离。
 
-### 文件沙箱
+### 文件访问与命令执行
 
-`list_files` / `read_file` / `write_file` / `search_files` 只能操作项目下的
-`workspace/` 目录：
+默认 `FILE_ACCESS_MODE=unrestricted`，文件工具可以访问本机任意路径：
 
-- 相对路径会被解析到 `workspace/` 内；
-- `../`、绝对路径、符号链接逃逸都会被拒绝；递归搜索也会跳过指向外部的符号链接；
-- 单文件读取上限 1 MB、写入上限 200000 字符；
-- Agent 被要求在覆盖文件前先用 `read_file` 查看原内容。
+- `path` 可以是绝对路径；相对路径以 `FILE_ROOT`（默认项目根目录）为基准；
+- 读取上限 5 MB，单次写入上限 1,000,000 字符；列表默认最多 200 项；
+- `edit_file` 做精确字符串替换。`old_text` 未找到或出现多次时拒绝执行，
+  避免改错位置；确需批量替换时显式设置 `replace_all=true`；
+- 递归搜索会跳过 `.git`、`node_modules`、`__pycache__`、虚拟环境等目录，
+  最多扫描 500 个文件；
+- 覆盖文件前，提示词要求模型先用 `read_file` 查看原内容；修改优先用
+  `edit_file`，不要用 `write_file` 重写整个文件；
+- 需要恢复旧行为时设置 `FILE_ACCESS_MODE=workspace`，此时所有路径必须位于
+  项目下的 `workspace/`，`../`、外部绝对路径和符号链接逃逸都会被拒绝。
+
+`run_command` 会在本机执行 shell 命令：
+
+- Windows 优先使用 Git Bash（`bash -lc`），没有则用 PowerShell；POSIX 使用
+  `/bin/sh -lc`；
+- 默认工作目录为项目根目录，也可以传绝对 `cwd`；
+- 默认超时 120 秒，最大 600 秒；超时会终止整个进程树；
+- 非交互式执行（stdin 关闭），合并后的 stdout/stderr 截断到
+  `COMMAND_MAX_OUTPUT_CHARS` 后返回，并附带退出码和耗时；
+- 提示词要求只用必要命令、优先只读操作，避免 `rm -rf`、格式化磁盘、
+  批量删除和系统配置修改，也不要启动交互式或长期运行的服务。
+
+### 工具权限（写文件 / 编辑 / 执行命令）
+
+与定位授权类似，高风险工具由调用触发一次性授权：
+
+```
+SSE:  {"type": "tool_permission_request", "token": "...", "session_id": "...",
+       "tool": "run_command", "title": "执行命令", "detail": "...",
+       "command": "...", "cwd": "...", "timeout": 120}
+POST: /api/tool-permission
+      {"token": "...", "session_id": "...", "allowed": true}
+```
+
+- token 与会话绑定、一次性使用；允许/拒绝/超时/取消后立即失效；
+- Web 端在输入框上方显示卡片，包含目标路径或完整命令；
+- CLI 端在终端打印同样信息并等待 `y/N`，`--yes` 可跳过；
+- 拒绝会变成工具错误 Observation，模型必须换方案或向用户说明，不能假装成功；
+- 等待时长由 `TOOL_PERMISSION_TIMEOUT`（默认 120 秒）控制；
+- `REQUIRE_TOOL_APPROVAL=false` 可关闭该确认（仅建议在受控脚本中使用）。
 
 ### GPS 定位（工具调用时授权）
 
@@ -458,22 +518,22 @@ react_agent/
 ├── memory.py           # 全局/会话记忆、TTL、容量、语义检索与提示词压缩
 ├── vector_memory.py    # SQLite 向量索引：特征哈希、混合检索、相关性重排
 ├── storage.py          # 共享路径锁 + JSON 原子写入
-├── tool_context.py     # 工具运行上下文（会话、记忆范围、GPS 坐标与授权回调）
+├── tool_context.py     # 工具运行上下文（会话、记忆范围、GPS/工具授权回调）
 ├── llm.py              # DeepSeek Chat Completions 客户端（含重试）
-├── prompts.py          # ReAct 系统提示词（含记忆规则）
-├── tools.py            # 十九个工具 + 工具注册表
+├── prompts.py          # ReAct 系统提示词（含记忆与工具安全规则）
+├── tools.py            # 二十一个工具 + 工具注册表
 ├── config.py           # .env / 环境变量加载
 ├── web/
 │   ├── index.html      # 聊天界面
 │   └── static/
-│       ├── app.js      # SSE、会话、记忆面板、Markdown、按需位置授权
+│       ├── app.js      # SSE、会话、记忆面板、Markdown、位置/工具授权
 │       ├── style.css   # 纸张编辑风 UI
 │       ├── icon.svg    # 项目图标（矢量）
 │       ├── icon-192.png / icon-512.png
 │       ├── apple-touch-icon.png
 │       ├── favicon.ico
 │       └── manifest.webmanifest
-├── workspace/          # Agent 的文件沙箱（自动创建）
+├── workspace/          # 默认文件目录（FILE_ACCESS_MODE=workspace 时的沙箱根）
 ├── data/
 │   ├── sessions/         # 会话文件（自动创建，已 gitignore）
 │   ├── memory.json       # 全局记忆（自动创建，已 gitignore）
@@ -494,7 +554,7 @@ react_agent/
 
 ## 7. 测试
 
-离线测试（共 125 个用例，不需要 Key、不需要网络；符号链接用例在无权限的
+离线测试（共 133 个用例，不需要 Key、不需要网络；符号链接用例在无权限的
 Windows 环境会自动跳过）：
 
 ```bash
@@ -502,15 +562,17 @@ python -m unittest discover -s tests -v
 ```
 
 覆盖内容：ReAct 解析与循环、引用提取、重复调用拦截、格式错误收口、取消检查、
-token 用量累计、工具安全、文件沙箱与符号链接逃逸、SSRF 重定向拦截、
-AQI 分级、会话 CRUD、会话/全局记忆隔离、记忆并发写、TTL 与过期清理、
-容量上限、上下文预算、单轮/跨轮上下文压缩与摘要失败回退、旧记忆迁移、
-向量索引的增量同步与作用域隔离、语义检索与关键词兜底、位置工具（含私网 IP
-拒绝与供应商回退）、浏览器 GPS 坐标格式化、反向地理编码失败降级、
-工具触发的位置授权（token 等待/唤醒、允许/拒绝、一次性失效、缺坐标校验）、
-`geo_lookup` 的坐标校验、Haversine 距离/方位角/中点、反向地理编码供应商回退、
-正向地理编码候选与回退、`/api/chat` 坐标传递与不落盘、非法坐标 422 校验、历史与记忆注入、
-SSE 流式接口、会话落盘。
+token 用量累计、工具安全、工作区模式与符号链接逃逸、非受限模式外部路径读写、
+`edit_file` 唯一匹配校验、写文件/命令授权（允许与拒绝）、命令执行、
+SSRF 重定向拦截、AQI 分级、会话 CRUD、会话/全局记忆隔离、记忆并发写、
+TTL 与过期清理、容量上限、上下文预算、单轮/跨轮上下文压缩与摘要失败回退、
+旧记忆迁移、向量索引的增量同步与作用域隔离、语义检索与关键词兜底、
+位置工具（含私网 IP 拒绝与供应商回退）、浏览器 GPS 坐标格式化、
+反向地理编码失败降级、工具触发的位置授权（token 等待/唤醒、允许/拒绝、
+一次性失效、缺坐标校验）、工具触发的写文件/命令授权（token 等待/唤醒、
+允许/拒绝、一次性失效）、`geo_lookup` 的坐标校验、Haversine 距离/方位角/中点、
+反向地理编码供应商回退、正向地理编码候选与回退、`/api/chat` 坐标传递与不落盘、
+非法坐标 422 校验、历史与记忆注入、SSE 流式接口、会话落盘。
 
 工具联网检查：
 
@@ -579,7 +641,12 @@ python agent.py --check-tools
 - `calculate` 使用 AST 白名单求值，不会执行任意 Python 代码。
 - `fetch_url` 只允许 http/https；手动跟随重定向并逐跳校验公网地址，
   阻止回环/内网/链路本地/保留地址，响应体限制 2 MB。
-- 文件搜索会跳过指向 workspace 外部的符号链接。
+- 默认允许访问本机任意文件路径；写文件、编辑文件、执行命令前必须由用户允许一次。
+  `REQUIRE_TOOL_APPROVAL=false` 会关闭确认，只应在隔离或受控环境中使用。
+- `run_command` 直接执行本机命令，超时上限 600 秒；它不是安全沙箱，模型仍可能
+  执行破坏性操作，因此提示词禁止高危命令，且每次调用都需要用户确认。
+- `FILE_ACCESS_MODE=workspace` 可以恢复旧沙箱；工作区模式会拒绝 `../`、外部绝对
+  路径和符号链接逃逸，递归搜索也会跳过指向外部的符号链接。
 - 外部网页和搜索结果会用边界标记包裹，提示模型只当数据、不当指令。
 - API Key 只从环境变量或 `.env` 读取，不会打印到日志。
 - 定位权限由工具调用触发，用户必须在授权卡片上点击「允许一次」；token 一次性、

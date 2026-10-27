@@ -38,6 +38,23 @@ MAX_CONCURRENT_RUNS = max(1, int(os.getenv("MAX_CONCURRENT_RUNS", "3")))
 # 调用 get_location 时等待用户在界面上授权浏览器定位的时长；超时回退到 IP 定位。
 LOCATION_PERMISSION_TIMEOUT = max(5, int(os.getenv("LOCATION_PERMISSION_TIMEOUT", "90")))
 
+# 文件访问范围：unrestricted 允许本机任意绝对路径；workspace 恢复旧的文件沙箱。
+FILE_ACCESS_MODE = os.getenv("FILE_ACCESS_MODE", "unrestricted").strip().lower()
+if FILE_ACCESS_MODE not in {"unrestricted", "workspace"}:
+    FILE_ACCESS_MODE = "unrestricted"
+# 相对路径的基准目录；默认项目根目录。
+FILE_ROOT = Path(os.getenv("FILE_ROOT", str(BASE_DIR))).expanduser().resolve()
+
+# 写文件、编辑文件、执行命令前是否请求用户确认。
+REQUIRE_TOOL_APPROVAL = os.getenv(
+    "REQUIRE_TOOL_APPROVAL", "true"
+).strip().lower() not in {"0", "false", "off", "no"}
+TOOL_PERMISSION_TIMEOUT = max(10, int(os.getenv("TOOL_PERMISSION_TIMEOUT", "120")))
+
+# 本机命令执行：默认超时与输出上限。
+COMMAND_TIMEOUT = max(5, int(os.getenv("COMMAND_TIMEOUT", "120")))
+COMMAND_MAX_OUTPUT_CHARS = max(1000, int(os.getenv("COMMAND_MAX_OUTPUT_CHARS", "12000")))
+
 # 单轮 ReAct 上下文压缩：scratchpad 超过阈值后，把较早步骤摘要掉，只保留最近原文。
 CONTEXT_COMPACT_CHARS = max(800, int(os.getenv("CONTEXT_COMPACT_CHARS", "7000")))
 CONTEXT_KEEP_CHARS = max(300, int(os.getenv("CONTEXT_KEEP_CHARS", "2400")))
