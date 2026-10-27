@@ -818,6 +818,9 @@ def _suggestion_is_feasible(text: str) -> bool:
     )
     if any(term in lowered for term in blocked):
         return False
+    # “评估是否需要……”只是待讨论的问题，不构成下一代要落地的改动。
+    if re.search(r"评估[^。；]{0,12}是否|是否(?:需要|要|应该)", str(text or "")):
+        return False
     return True
 
 
