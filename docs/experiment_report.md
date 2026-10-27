@@ -206,7 +206,7 @@ TOOL_FUNCS["get_weather"] = get_weather
 | 单次输出上限 | 2048 tokens |
 | 天气 / 空气质量 | Open-Meteo 公开 API |
 | 工具数量 | 21 |
-| 离线测试 | 148 个用例 |
+| 离线测试 | 150 个用例 |
 
 #### 4.2 工具自检
 
@@ -331,15 +331,15 @@ python -m unittest discover -s tests -v
 结果：
 
 ```text
-Ran 148 tests in 6.651s
+Ran 150 tests in 7.984s
 OK (skipped=1)
 ```
 
-148 个用例中 147 个通过，1 个符号链接用例因 Windows 权限跳过。覆盖 ReAct 解析与循环、工具安全、文件访问与命令执行、Git 与测试运行、自进化裁判与安全沙箱、SSRF 拦截、记忆并发与 TTL、上下文压缩、会话隔离、SSE、位置授权、工具授权、地理查询等。
+150 个用例中 149 个通过，1 个符号链接用例因 Windows 权限跳过。覆盖 ReAct 解析与循环、工具安全、文件访问与命令执行、Git 与测试运行、自进化裁判与安全沙箱、SSRF 拦截、记忆并发与 TTL、上下文压缩、会话隔离、SSE、位置授权、工具授权、地理查询等。
 
 ![图2 离线测试分布](figures/fig2_test_coverage.png)
 
-*图2：148 个离线用例的分布。*
+*图2：150 个离线用例的分布。*
 
 ---
 
@@ -450,7 +450,7 @@ python -m unittest discover -s tests -v
 | `vector_memory.py` | 本地特征哈希向量索引 |
 | `storage.py` | 共享路径锁 + JSON 原子写入 |
 | `sessions.py` | 会话持久化 |
-| `tests/` | 148 个离线测试 |
+| `tests/` | 150 个离线测试 |
 
 ### 附录 B：完整天气任务轨迹
 

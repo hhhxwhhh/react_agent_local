@@ -29,6 +29,7 @@ class TestEvolutionHelpers(unittest.TestCase):
             "tests/test_agent.py",
             "tests",
             "evolution.py",
+            "evaluation.py",
             "config.py",
             "requirements.txt",
             ".gitignore",
@@ -106,6 +107,67 @@ class TestEvolutionHelpers(unittest.TestCase):
         self.assertIn("evolution.py", question)
         self.assertIn("不要执行 git commit", question)
         self.assertIn("build_generation_question", question)
+        self.assertIn("暂无历史记录", question)
+
+        with_history = harness.build_generation_question(
+            generation=4,
+            objective="继续改进",
+            baseline_commit="abcdef123456",
+            max_diff_lines=120,
+            protected_paths=["tests/"],
+            history="- 第 3 代 accepted｜目标：提升工具错误处理",
+        )
+        self.assertIn("第 3 代 accepted", with_history)
+        self.assertIn("不要原样重复", with_history)
+
+    def test_generation_history_summary(self):
+        entries = [
+            {
+                "generation": 1,
+                "decision": "accepted",
+                "objective": "补强工具错误处理",
+                "candidate": {
+                    "commit": "abc123def456",
+                    "changed_files": ["agent.py", "tools.py"],
+                    "tests": {"total": 148},
+                    "eval_score": 1.0,
+                },
+                "agent": {
+                    "final_answer": (
+                        "Final Answer:\n"
+                        "- 对下一代 Harness 的建议：增加离线评测集"
+                    )
+                },
+                "reason": "全部通过",
+            },
+            {
+                "generation": 2,
+                "decision": "rejected",
+                "objective": "重写整个 Agent",
+                "candidate": {"changed_files": ["agent.py"], "tests": {"total": 149}},
+                "reason": "候选测试未通过",
+            },
+        ]
+        with patch.object(evolution, "_read_ledger", return_value=entries):
+            history = evolution._generation_history()
+
+        self.assertIn("第 1 代", history)
+        self.assertIn("accepted", history)
+        self.assertIn("补强工具错误处理", history)
+        self.assertIn("abc123def456", history)
+        self.assertIn("agent.py", history)
+        self.assertIn("增加离线评测集", history)
+        self.assertIn("第 2 代", history)
+        self.assertIn("rejected", history)
+        self.assertIn("候选测试未通过", history)
+
+    def test_evaluation_suite_passes(self):
+        import evaluation
+
+        result = evaluation.run_suite(verbose=False)
+        self.assertEqual(result["total"], evaluation.SCENARIO_TOTAL)
+        self.assertEqual(result["passed"], result["total"], result["failed"])
+        self.assertEqual(result["score"], 1.0)
 
     def test_next_generation_from_ledger(self):
         with tempfile.TemporaryDirectory() as temp_dir:

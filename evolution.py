@@ -52,6 +52,7 @@ TAG_PREFIX = "evo-gen-"
 PROTECTED_EXACT = {
     "evolution.py",
     "evolution_gate.py",
+    "evaluation.py",
     "config.py",
     "requirements.txt",
     ".gitignore",
@@ -704,6 +705,69 @@ def _next_generation(root: Path = ROOT) -> int:
     return maximum + 1
 
 
+def _extract_next_suggestion(entry: dict[str, Any]) -> str:
+    """从上一代最终答案里提取“对下一代的建议”，用于闭环。"""
+    agent_record = entry.get("agent")
+    if not isinstance(agent_record, dict):
+        return ""
+    answer = str(agent_record.get("final_answer") or "")
+    match = re.search(
+        r"对下一代\s*Harness\s*的建议\s*[:：]\s*(.+)",
+        answer,
+        re.I | re.S,
+    )
+    if not match:
+        return ""
+    value = re.split(r"\n\s*[-*]\s*", match.group(1), maxsplit=1)[0]
+    return _one_line(value.strip(), 180)
+
+
+def _generation_history(limit: int = 6) -> str:
+    """把最近 accepted/rejected 记录压缩成可注入提示词的历史摘要。"""
+    entries = [
+        entry
+        for entry in _read_ledger()
+        if entry.get("decision") in {"accepted", "rejected"}
+    ]
+    if not entries:
+        return ""
+    lines: list[str] = []
+    for entry in entries[-max(1, int(limit)) :]:
+        candidate = entry.get("candidate")
+        candidate = candidate if isinstance(candidate, dict) else {}
+        baseline = entry.get("baseline")
+        baseline = baseline if isinstance(baseline, dict) else {}
+        tests = candidate.get("tests") or baseline.get("tests") or {}
+        tests = tests if isinstance(tests, dict) else {}
+        score = candidate.get("eval_score")
+        if score is None:
+            score = baseline.get("eval_score")
+
+        parts = [
+            f"第 {entry.get('generation', '?')} 代",
+            str(entry.get("decision") or "?"),
+            f"目标：{_one_line(str(entry.get('objective') or ''), 100)}",
+        ]
+        if candidate.get("commit"):
+            parts.append(f"提交：{str(candidate.get('commit'))[:12]}")
+        if tests.get("total") is not None:
+            parts.append(f"测试：{tests.get('total')}")
+        if score is not None:
+            parts.append(f"评分：{score}")
+        lines.append("- " + "｜".join(parts))
+
+        changed = candidate.get("changed_files") or []
+        if isinstance(changed, list) and changed:
+            lines.append("  改动：" + "、".join(str(path) for path in changed[:6]))
+        reason = _one_line(str(entry.get("reason") or ""), 160)
+        if reason:
+            lines.append("  结果：" + reason)
+        suggestion = _extract_next_suggestion(entry)
+        if suggestion:
+            lines.append("  下一代建议：" + suggestion)
+    return "\n".join(lines)
+
+
 def _permission_entry(payload: dict) -> dict[str, Any]:
     keys = (
         "tool",
@@ -1045,6 +1109,12 @@ def run_single_generation(args: argparse.Namespace) -> int:
             return 1
 
         env_before = _env_fingerprint(ROOT)
+        history_text = _generation_history()
+        if history_text:
+            print(
+                "[harness] 已注入历史迭代记录："
+                f"{sum(1 for line in history_text.splitlines() if line.startswith('- '))} 代"
+            )
         question = harness.build_generation_question(
             generation=generation,
             objective=objective,
@@ -1052,6 +1122,7 @@ def run_single_generation(args: argparse.Namespace) -> int:
             max_diff_lines=args.max_diff_lines,
             protected_paths=sorted(PROTECTED_EXACT)
             + [prefix.rstrip("/") for prefix in PROTECTED_PREFIXES],
+            history=history_text,
         )
         permission_log: list[dict[str, Any]] = record["agent"]["permissions"]
         print("[harness] 调用当前版本 Agent 修改自身……")
@@ -1361,6 +1432,12 @@ def show_status() -> int:
     return 0
 
 
+def _default_eval_command() -> str:
+    """默认运行仓库内固定的离线评测集；传空字符串可关闭。"""
+    executable = sys.executable or "python"
+    return f'"{executable}" evaluation.py'
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="自进化 Harness：让当前 Agent 开发下一代自己"
@@ -1383,8 +1460,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--eval-command",
-        default="",
-        help="可选评测命令；输出 JSON 的 score/fitness/accuracy 或 score=...",
+        default=_default_eval_command(),
+        help=(
+            "评测命令，默认运行 evaluation.py；输出 JSON 的 "
+            "score/fitness/accuracy 或 score=...。传空字符串可关闭。"
+        ),
     )
     parser.add_argument(
         "--min-delta",

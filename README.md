@@ -226,10 +226,13 @@ python evolution.py --status
 # 跑一代：Agent 自主选择最小改进目标
 python evolution.py --generations 1 --yes
 
-# 指定目标和连续迭代；可选评测命令输出 score=...
+# 指定目标和连续迭代；默认评测命令是 `python evaluation.py`
 python evolution.py \
   --objective "补强某个具体工具的错误处理" \
-  --generations 3 --yes \
+  --generations 3 --yes
+
+# 也可以接入自己的固定任务集；输出 JSON 的 score/fitness/accuracy 或 score=...
+python evolution.py --generations 3 --yes \
   --eval-command "python your_eval.py"
 ```
 
@@ -237,22 +240,28 @@ python evolution.py \
 
 ```text
 工作区干净
-  → 基线测试 + 安全检查通过
+  → 基线测试 + 安全检查 + 默认离线评测通过
   → Agent 修改源码
-  → 冻结路径检查（tests/、evolution.py、config.py、.env 等）
+  → 冻结路径检查（tests/、evolution.py、evaluation.py、config.py、.env 等）
   → 改动量预算 + py_compile + 安全检查
   → 完整测试通过且测试数不减少
-  → 可选评测分数不低于 baseline
+  → 评测分数不低于 baseline（可继续调高 --min-delta）
   → 接受：git commit + tag evo-gen-N
   → 拒绝：保存 diff 到 data/evolution/rejected/ 并 git reset --hard 回滚
 ```
 
 可进化范围包括 `agent.py`、`tools.py`、`prompts.py`、`harness.py` 等；
-`harness.py` 是可进化的元策略，`evolution.py`、`tests/`、`config.py` 是冻结的
-裁判边界。记录写入 `data/evolution/ledger.jsonl`（已 gitignore）。
+`harness.py` 是可进化的元策略，`evolution.py`、`evaluation.py`、`tests/`、
+`config.py` 是冻结的裁判边界。记录写入 `data/evolution/ledger.jsonl`
+（已 gitignore），最近几代的结论、失败原因和“下一代建议”会自动注入下一代
+提示词，避免重复踩坑。
 
-注意：Harness 要求工作区干净，且不会自动 push。默认只用测试作为选择信号；
-真正的能力提升需要你自己提供固定任务集和 `--eval-command`。
+`evaluation.py` 是本地离线行为评测：脚本化 LLM 驱动真实 ReAct 循环，覆盖
+文件读取、错误恢复、会话记忆、批量补丁原子性、权限拒绝、受保护路径、重复
+调用、未知工具、强制收口和引用提取，不联网、不写仓库。它提供的是“行为无
+回归”信号；要证明开放任务能力变强，仍建议接入自己的 held-out 任务集。
+
+注意：Harness 要求工作区干净，且不会自动 push。
 
 ---
 
@@ -409,9 +418,9 @@ git status / git diff
 - **不能修改 `tests/` 或评测脚本来让测试通过**；测试是选择信号，不是优化目标；
 - `.git`、`data/`、`.env`、权限确认逻辑和安全边界默认不可删除/移动；
 - 不要执行 `git push`、强制推送、改写历史或删除分支/标签；
-- 测试通过只证明工程正确性；要证明“能力变强”，还需要固定任务集、baseline
-  和 held-out 评测。`evolution.py --eval-command` 可以接入你自己的评分脚本，
-  否则只能做“无回归”迭代，不能保证每代都在变强。
+- 测试通过只证明工程正确性；`evaluation.py` 额外提供固定的本地行为评测，
+  默认参与基线/候选分数比较。要证明开放任务上的“能力变强”，仍建议通过
+  `evolution.py --eval-command` 接入自己的 held-out 任务集和评分脚本。
 
 ### GPS 定位（工具调用时授权）
 
@@ -590,7 +599,8 @@ react_agent/
 ├── tool_context.py     # 工具运行上下文（会话、记忆范围、GPS/工具授权回调）
 ├── llm.py              # DeepSeek Chat Completions 客户端（含重试）
 ├── prompts.py          # ReAct 系统提示词（含记忆与工具安全规则）
-├── tools.py            # 二十六个工具 + 工具注册表
+├── tools.py            # 15 个注册工具 + 内部工具实现与注册表
+├── evaluation.py       # 固定离线行为评测（自进化的默认评分信号）
 ├── config.py           # .env / 环境变量加载
 ├── harness.py          # 可进化的自进化元策略（目标与下一代提示词）
 ├── evolution.py        # 不可进化的裁判：基线/验证/提交/回滚/分代记录
@@ -613,8 +623,8 @@ react_agent/
 │   ├── test_agent.py        # 解析、工具、ReAct 循环
 │   ├── test_memory.py       # 并发、TTL、容量、上下文预算、迁移
 │   ├── test_sessions.py     # 会话、分层记忆、Web API
-│   ├── test_vector_memory.py# 向量检索、关键词兜底、位置与地理查询工具
-│   └── test_evolution.py    # 自进化裁判、diff 预算、评分解析、沙箱安全检查
+│   ├── test_vector_memory.py # 向量检索、关键词兜底、位置与地理查询工具
+│   └── test_evolution.py    # 自进化裁判、历史注入、离线评测、沙箱安全检查
 ├── AGENT_DEEP_DIVE.md  # 原理、评测与组会答辩手册
 ├── 2210.03629v3.pdf    # ReAct 原论文（ICLR 2023）
 ├── requirements.txt
@@ -626,7 +636,7 @@ react_agent/
 
 ## 7. 测试
 
-离线测试（共 148 个用例，不需要 Key、不需要网络；符号链接用例在无权限的
+离线测试（共 150 个用例，不需要 Key、不需要网络；符号链接用例在无权限的
 Windows 环境会自动跳过）：
 
 ```bash
@@ -647,7 +657,9 @@ TTL 与过期清理、容量上限、上下文预算、单轮/跨轮上下文压
 允许/拒绝、一次性失效）、`geo_lookup` 的坐标校验、Haversine 距离/方位角/中点、
 反向地理编码供应商回退、正向地理编码候选与回退、`/api/chat` 坐标传递与不落盘、
 非法坐标 422 校验、历史与记忆注入、SSE 流式接口、会话落盘、自进化裁判的
-冻结路径检查、diff 行数预算、测试/评分解析、临时沙箱安全探针。
+冻结路径检查、diff 行数预算、测试/评分解析、临时沙箱安全探针、历史迭代摘要
+与建议闭环，以及 11 个离线行为评测场景（读取、错误恢复、会话记忆、批量补丁
+原子性、权限拒绝、受保护路径、重复调用、未知工具、强制收口、引用提取）。
 
 工具联网检查：
 
