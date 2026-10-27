@@ -69,7 +69,9 @@ READ_REPEAT_THRESHOLD = 3
 # 避免内存缓慢泄漏；单个文件的历史区间也做长度上限，防止极端情况下膨胀。
 READ_HISTORY_MAX_FILES = 256
 READ_HISTORY_MAX_INTERVALS = 32
-_READ_HISTORY: dict[str, list[tuple[int, int]]] = {}
+# key 为 (session_id, path)：不同会话读取同一文件互不影响，避免跨会话
+# 误跳过/误计数；session_id 为 None 时表示无会话上下文（CLI/脚本）。
+_READ_HISTORY: dict[tuple[str | None, str], list[tuple[int, int]]] = {}
 
 
 def _evict_read_history_if_needed() -> None:
@@ -80,17 +82,34 @@ def _evict_read_history_if_needed() -> None:
         _READ_HISTORY.pop(oldest, None)
 
 
-def reset_read_history() -> None:
-    """清空读取历史。供会话结束/长驻进程定期清理时显式调用。"""
-    _READ_HISTORY.clear()
+def reset_read_history(session_id: str | None = None) -> None:
+    """清空读取历史。
+
+    传入 session_id 时只清理该会话的记录（会话删除时调用）；
+    不传时清空全部（兼容旧调用与长驻进程定期清理）。
+    """
+    if session_id is None:
+        _READ_HISTORY.clear()
+        _READ_SKIP_STREAK.clear()
+        return
+    for key in [k for k in _READ_HISTORY if k[0] == session_id]:
+        _READ_HISTORY.pop(key, None)
+    _READ_SKIP_STREAK.pop(session_id, None)
 
 
 def _forget_read_history(target: Path) -> None:
-    """文件内容变化后，之前的读取记录已过期，清掉该文件的区间历史。"""
-    _READ_HISTORY.pop(str(target), None)
+    """文件内容变化后，之前的读取记录已过期，清掉该文件的区间历史。
+
+    文件内容对所有会话都已变化，因此按 path 清理所有 session 的记录。
+    """
+    path_key = str(target)
+    for key in [k for k in _READ_HISTORY if k[1] == path_key]:
+        _READ_HISTORY.pop(key, None)
 
 
-def _record_read_interval(key: str, first: int, last: int) -> int:
+def _record_read_interval(
+    key: tuple[str | None, str], first: int, last: int
+) -> int:
     """记录一次读取区间，返回该文件累计读取次数。"""
     # 先移除再插入，使该 key 成为“最近使用”，配合容量淘汰实现近似 LRU。
     history = _READ_HISTORY.pop(key, None)
@@ -104,7 +123,7 @@ def _record_read_interval(key: str, first: int, last: int) -> int:
     return len(history)
 
 
-def _read_guard_reminder(key: str) -> str:
+def _read_guard_reminder(key: tuple[str | None, str]) -> str:
     """判断是否需要注入探索效率提醒，需要则返回提醒文本。"""
     history = _READ_HISTORY.get(key, [])
     count = len(history)
@@ -168,31 +187,29 @@ def _overlap_ratio(
 # 连续硬跳过计数：read_file 命中硬跳过时 +1，成功读取时清零。
 # agent.py 在每步工具调用后读取该计数，达到阈值时注入“请改用 search_files”
 # 的系统消息，形成工具层 + 循环层的双重收敛。
-_READ_SKIP_STREAK = 0
+# 按 session_id 计数：不同会话的硬跳过互不干扰，避免跨会话误计数。
+_READ_SKIP_STREAK: dict[str | None, int] = {}
 READ_SKIP_STREAK_LIMIT = 2
 
 
-def consume_read_skip_streak() -> int:
-    """返回并清零连续硬跳过计数（供 agent.py 循环层消费）。"""
-    global _READ_SKIP_STREAK
-    streak = _READ_SKIP_STREAK
-    _READ_SKIP_STREAK = 0
-    return streak
+def consume_read_skip_streak(session_id: str | None = None) -> int:
+    """返回并清零指定会话的连续硬跳过计数（供 agent.py 循环层消费）。"""
+    return _READ_SKIP_STREAK.pop(session_id, 0)
 
 
-def _bump_read_skip_streak() -> None:
+def _bump_read_skip_streak(session_id: str | None = None) -> None:
     """记录一次硬跳过。"""
-    global _READ_SKIP_STREAK
-    _READ_SKIP_STREAK += 1
+    _READ_SKIP_STREAK[session_id] = _READ_SKIP_STREAK.get(session_id, 0) + 1
 
 
-def _reset_read_skip_streak() -> None:
+def _reset_read_skip_streak(session_id: str | None = None) -> None:
     """成功读取后清零连续硬跳过计数。"""
-    global _READ_SKIP_STREAK
-    _READ_SKIP_STREAK = 0
+    _READ_SKIP_STREAK.pop(session_id, None)
 
 
-def _read_skip_notice(key: str, first: int, last: int) -> str:
+def _read_skip_notice(
+    key: tuple[str | None, str], first: int, last: int
+) -> str:
     """读取前检查：若本次区间与历史区间高度重叠，返回硬跳过提示。
 
     命中时调用方应直接返回该提示，不再实际读取文件，也不记录本次区间，
@@ -2035,6 +2052,7 @@ def read_file(
     max_chars: int = 4000,
     start_line: int = 0,
     end_line: int = 0,
+    context: ToolContext | None = None,
 ) -> str:
     """读取本机文本文件；可用 1-based 行区间分段读取大文件。
 
@@ -2044,14 +2062,18 @@ def read_file(
     探索效率护栏：同一文件被反复读取且区间重叠/递增时，会在返回文本尾部
     追加系统提醒，引导改用 search_files 定位行号。
     """
+    session_id = getattr(context, "session_id", None)
     try:
-        key = str(_resolve_path(path))
+        key: tuple[str | None, str] | None = (
+            session_id,
+            str(_resolve_path(path)),
+        )
         first = int(start_line or 0)
         last = int(end_line or 0)
-        # 硬跳过：同一文件同一/高度重叠区间直接返回提示，不实际读取。
+        # 硬跳过：同一会话同一文件同一/高度重叠区间直接返回提示，不实际读取。
         skip_notice = _read_skip_notice(key, first, last)
         if skip_notice:
-            _bump_read_skip_streak()
+            _bump_read_skip_streak(session_id)
             return skip_notice
     except Exception:
         # 护栏绝不能影响正常读取
@@ -2059,7 +2081,7 @@ def read_file(
         first = last = 0
 
     result = _read_file_impl(path, max_chars, start_line, end_line)
-    _reset_read_skip_streak()
+    _reset_read_skip_streak(session_id)
     try:
         if key is not None:
             # 记录区间时把“开放末尾”哨兵替换为实际文件行数，避免
@@ -3163,6 +3185,7 @@ TOOL_SPECS: dict[str, dict] = {
     },
     "read_file": {
         "description": "读取本机文本文件，适合查看源码、配置、笔记和数据。大文件用 start_line/end_line 分段读取，避免一次读不完或反复读同一文件。path 可为绝对路径；相对路径以项目根目录为基准。",
+        "context": True,
         "parameters": {
             "type": "object",
             "properties": {

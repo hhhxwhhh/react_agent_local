@@ -346,9 +346,8 @@ def rename_session(session_id: str, body: RenameRequest) -> dict:
 def delete_session(session_id: str) -> dict:
     if not store.delete(session_id):
         raise HTTPException(status_code=404, detail="会话不存在")
-    # 读历史 key 目前只按 path 记录、不含 session_id，无法精确按会话清理；
-    # 这里做保守的全量清理，避免长驻进程里已删除会话的读历史长期残留。
-    tools.reset_read_history()
+    # 读历史 key 为 (session_id, path)，按会话精确清理，不影响其他会话。
+    tools.reset_read_history(session_id)
     return {"deleted": True}
 
 
