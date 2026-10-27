@@ -57,6 +57,45 @@ from tool_context import ToolContext
 REQUEST_TIMEOUT = 15
 MAX_OBSERVATION_CHARS = 12000
 
+# ---------------------------------------------------------------------------
+# 探索效率护栏：追踪同一文件的 read_file 读取历史
+# ---------------------------------------------------------------------------
+# 当同一文件被反复读取（次数超过阈值）且读取区间呈现重叠或递增趋势时，
+# 说明模型可能陷入“盲目逐段读取”的循环。此时在返回文本尾部追加一条
+# 系统提醒，引导模型改用 search_files 定位行号后定向读取。
+READ_REPEAT_THRESHOLD = 3
+_READ_HISTORY: dict[str, list[tuple[int, int]]] = {}
+
+
+def _record_read_interval(key: str, first: int, last: int) -> int:
+    """记录一次读取区间，返回该文件累计读取次数。"""
+    history = _READ_HISTORY.setdefault(key, [])
+    history.append((first, last))
+    return len(history)
+
+
+def _read_guard_reminder(key: str) -> str:
+    """判断是否需要注入探索效率提醒，需要则返回提醒文本。"""
+    history = _READ_HISTORY.get(key, [])
+    count = len(history)
+    if count <= READ_REPEAT_THRESHOLD:
+        return ""
+    recent = history[-READ_REPEAT_THRESHOLD:]
+    overlapping = 0
+    increasing = 0
+    for prev, cur in zip(recent, recent[1:]):
+        if cur[0] <= prev[1]:
+            overlapping += 1
+        if cur[0] >= prev[0] and cur[1] >= prev[1]:
+            increasing += 1
+    if overlapping == 0 and increasing == 0:
+        return ""
+    return (
+        f"\n\n[系统提醒] 你已第 {count} 次读取该文件，且读取区间存在重叠/递增。"
+        "请停止盲目逐段读取：先用 search_files（search_content=true）或"
+        "grep 定位目标行号，再用 start_line/end_line 定向读取必要区间。"
+    )
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -1875,7 +1914,32 @@ def read_file(
 
     start_line/end_line 为 0 时分别表示“从第一行开始”和“读到文件末尾”。
     行区间包含 end_line；返回内容仍受 max_chars 限制。
+
+    探索效率护栏：同一文件被反复读取且区间重叠/递增时，会在返回文本尾部
+    追加系统提醒，引导改用 search_files 定位行号。
     """
+    result = _read_file_impl(path, max_chars, start_line, end_line)
+    try:
+        key = str(_resolve_path(path))
+        first = int(start_line or 0)
+        last = int(end_line or 0)
+        _record_read_interval(key, first, last)
+        reminder = _read_guard_reminder(key)
+        if reminder:
+            result += reminder
+    except Exception:
+        # 护栏绝不能影响正常读取
+        pass
+    return result
+
+
+def _read_file_impl(
+    path: str,
+    max_chars: int = 4000,
+    start_line: int = 0,
+    end_line: int = 0,
+) -> str:
+    """read_file 的实际实现（不含探索效率护栏）。"""
     target = _resolve_path(path)
     if not target.exists():
         raise ValueError(f"文件不存在：{_display_path(target)}")
