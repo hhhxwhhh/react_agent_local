@@ -948,6 +948,8 @@ def _run_agent(
         use_color=not args.no_color,
         tool_context=context,
         default_memory_scope="global",
+        # 自进化的核心失败模式是一直读、不动手：连续 8 步只读后强制提醒落地。
+        progress_nudge_steps=8,
     )
     answer = agent.run(question, memory_context=global_memory_context(question))
     return (

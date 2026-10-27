@@ -589,6 +589,40 @@ class TestLoopGuards(unittest.TestCase):
         self.assertTrue(agent.last_trace[1].get("duplicate"))
         self.assertIn("重复调用", agent.last_trace[1]["observation"])
 
+    def test_progress_nudge_after_read_only_streak(self):
+        with tempfile.TemporaryDirectory() as folder:
+            first = Path(folder) / "first.txt"
+            second = Path(folder) / "second.txt"
+            first.write_text("A\n", encoding="utf-8")
+            second.write_text("B\n", encoding="utf-8")
+            llm = FakeLLM(
+                [
+                    'Thought: 读第一个文件。\nAction: read_file\n'
+                    f'Action Input: {{"path": "{first.as_posix()}"}}',
+                    'Thought: 读第二个文件。\nAction: read_file\n'
+                    f'Action Input: {{"path": "{second.as_posix()}"}}',
+                    "Thought: 信息足够。\nFinal Answer: 读到 A 和 B。",
+                ]
+            )
+            events: list[dict] = []
+            agent = ReActAgent(
+                llm,
+                max_steps=4,
+                verbose=False,
+                use_color=False,
+                progress_nudge_steps=2,
+                on_event=events.append,
+            )
+            answer = agent.run("读两个文件")
+
+        self.assertEqual(answer, "读到 A 和 B。")
+        self.assertNotIn("只读探索", llm.calls[1][1])
+        self.assertIn("连续 2 步只读探索", llm.calls[2][1])
+        self.assertIn("apply_patch", llm.calls[2][1])
+        self.assertTrue(
+            any("只读探索" in event.get("text", "") for event in events)
+        )
+
     def test_repeated_invalid_output_stops_early(self):
         llm = FakeLLM(
             [

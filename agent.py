@@ -49,6 +49,14 @@ STATE_CHANGING_TOOLS = {
     "git",
     "remember",
 }
+# 只有这些工具算“真正推进了修改”；run_command/git 常被用于探索，不能算收敛。
+WRITE_TOOLS = {
+    "write_file",
+    "apply_patch",
+    "edit_file",
+    "move_file",
+    "delete_file",
+}
 # 连续两次被判定为重复调用，或连续三次格式错误后，提前收口。
 MAX_CONSECUTIVE_DUPLICATES = 2
 MAX_CONSECUTIVE_INVALID = 3
@@ -355,6 +363,7 @@ class ReActAgent:
         history_compact_messages: int | None = None,
         history_keep_messages: int | None = None,
         history_summary_batch_messages: int | None = None,
+        progress_nudge_steps: int = 0,
     ) -> None:
         self.llm = llm
         self.max_steps = max(1, int(max_steps))
@@ -404,6 +413,8 @@ class ReActAgent:
         self.history_summary_batch_messages = max(
             1, int(history_summary_batch_messages or HISTORY_SUMMARY_BATCH_MESSAGES)
         )
+        # 连续只读探索多少步后提醒模型开始写操作；0 表示关闭（默认）。
+        self.progress_nudge_steps = max(0, int(progress_nudge_steps or 0))
         self.history_summary_input_chars = max(
             4000, min(16000, self.history_compact_chars * 2)
         )
@@ -775,6 +786,7 @@ class ReActAgent:
         seen_calls: set[str] = set()
         consecutive_duplicates = 0
         consecutive_invalid = 0
+        read_only_streak = 0
         stalled = False
         stall_reason = ""
 
@@ -933,6 +945,39 @@ class ReActAgent:
                         }
                     )
                     break
+
+                if not parse_error:
+                    if tool_name in WRITE_TOOLS:
+                        read_only_streak = 0
+                    else:
+                        read_only_streak += 1
+
+                if (
+                    self.progress_nudge_steps
+                    and read_only_streak >= self.progress_nudge_steps
+                    and step < self.max_steps
+                ):
+                    scratchpad += (
+                        "\nObservation: [系统提示] 你已经连续 "
+                        f"{read_only_streak} 步只读探索，尚未产生任何修改。"
+                        "如果任务需要改代码，请现在确定一个最小假设，"
+                        "直接使用 apply_patch 或 write_file 落地，"
+                        "然后用 run_tests 验证；不要再重复查看同一文件、"
+                        "同一行区间或 git status。如果任务不需要修改，"
+                        "请立即输出 Final Answer。\n"
+                    )
+                    self._say(_yellow("(连续只读探索，已提醒开始落地修改)"))
+                    self._emit(
+                        {
+                            "type": "note",
+                            "step": step,
+                            "text": (
+                                f"连续 {read_only_streak} 步只读探索，"
+                                "已提醒模型开始修改或收口"
+                            ),
+                        }
+                    )
+                    read_only_streak = 0
                 continue
 
             # 模型既没有给出合法 Action，也没有给出 Final Answer
