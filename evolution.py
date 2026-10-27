@@ -818,9 +818,6 @@ def _suggestion_is_feasible(text: str) -> bool:
     )
     if any(term in lowered for term in blocked):
         return False
-    head = str(text or "").lstrip("*`# ").strip()
-    if head.startswith(("本代", "这一代", "本次")):
-        return False
     return True
 
 
@@ -833,8 +830,13 @@ def _similar(a: str, b: str) -> bool:
         return False
     if left in right or right in left:
         return True
+    ratio = SequenceMatcher(None, left, right).ratio()
     # 同一目标换一种措辞复述时相似度常在 0.5 左右，阈值取 0.45。
-    return SequenceMatcher(None, left, right).ratio() >= 0.45
+    # 以“本代/这一代”开头的复盘句经常先复述上一代目标，用更松的阈值判定。
+    head = left.lstrip("*`# ").strip()
+    if head.startswith(("本代", "这一代", "本次")):
+        return ratio >= 0.35
+    return ratio >= 0.45
 
 
 def _auto_objective() -> tuple[str, dict[str, Any]]:
