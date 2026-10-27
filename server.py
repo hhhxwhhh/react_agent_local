@@ -39,6 +39,7 @@ from llm import DeepSeekLLM, LLMError
 from memory import GLOBAL_MEMORY_FILE, JsonMemory, format_memory_context
 from sessions import DEFAULT_TITLE, SessionStore
 from tool_context import ToolContext
+import tools
 
 WEB_DIR = BASE_DIR / "web"
 STATIC_DIR = WEB_DIR / "static"
@@ -345,6 +346,9 @@ def rename_session(session_id: str, body: RenameRequest) -> dict:
 def delete_session(session_id: str) -> dict:
     if not store.delete(session_id):
         raise HTTPException(status_code=404, detail="会话不存在")
+    # 读历史 key 目前只按 path 记录、不含 session_id，无法精确按会话清理；
+    # 这里做保守的全量清理，避免长驻进程里已删除会话的读历史长期残留。
+    tools.reset_read_history()
     return {"deleted": True}
 
 
