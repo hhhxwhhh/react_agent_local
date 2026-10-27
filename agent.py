@@ -61,6 +61,57 @@ WRITE_TOOLS = {
     "move_file",
     "delete_file",
 }
+
+# run_command 里明显只读的命令前缀；命中这些前缀时即使退出码为 0 也不算落地修改。
+_READONLY_COMMAND_PREFIXES = (
+    "grep",
+    "rg",
+    "cat",
+    "type ",
+    "head",
+    "tail",
+    "less",
+    "more ",
+    "ls",
+    "dir",
+    "find",
+    "where ",
+    "which ",
+    "wc ",
+    "git status",
+    "git diff",
+    "git log",
+    "git show",
+    "git branch",
+    "git rev-parse",
+    "pwd",
+    "echo ",
+    "python -c \"print",
+    "python -X utf8 -c \"print",
+)
+
+
+def _command_is_readonly(command: str) -> bool:
+    """粗略判断一条 shell 命令是否只读（用于只读步数统计）。"""
+    text = str(command or "").strip().lower()
+    if not text:
+        return True
+    # 取第一个简单命令（忽略管道/重定向后的部分）做前缀判断。
+    head = text.split("&&")[0].split("||")[0].split("|")[0].split(";")[0].strip()
+    return head.startswith(_READONLY_COMMAND_PREFIXES)
+
+
+def _command_succeeded(observation: str) -> bool:
+    """根据 run_command 的 observation 判断命令是否成功执行。"""
+    text = str(observation or "")
+    if "ERROR:" in text:
+        return False
+    return "退出码：0" in text
+
+
+def _run_command_landed(command: str, observation: str) -> bool:
+    """成功的非只读 run_command 视为已落地修改。"""
+    return (not _command_is_readonly(command)) and _command_succeeded(observation)
 # 连续两次被判定为重复调用，或连续三次格式错误后，提前收口。
 MAX_CONSECUTIVE_DUPLICATES = 2
 MAX_CONSECUTIVE_INVALID = 3
@@ -967,7 +1018,16 @@ class ReActAgent:
                     break
 
                 if not parse_error:
-                    if tool_name in WRITE_TOOLS:
+                    landed = tool_name in WRITE_TOOLS
+                    if (
+                        not landed
+                        and tool_name == "run_command"
+                        and isinstance(args, dict)
+                    ):
+                        landed = _run_command_landed(
+                            str(args.get("command", "")), observation
+                        )
+                    if landed:
                         read_only_streak = 0
                     else:
                         read_only_streak += 1
