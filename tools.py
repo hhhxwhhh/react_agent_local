@@ -2063,6 +2063,7 @@ def apply_patch(
 
     originals: dict[Path, str] = {}
     current: dict[Path, str] = {}
+    normalized_originals: dict[Path, str] = {}
     newlines: dict[Path, str] = {}
     replacements: dict[Path, int] = {}
 
@@ -2088,6 +2089,7 @@ def apply_patch(
             originals[target] = _read_text_file(target)
             newlines[target] = _detect_newline(originals[target])
             current[target] = _normalize_newlines(originals[target])
+            normalized_originals[target] = current[target]
 
         match_old = _normalize_newlines(old)
         match_new = _normalize_newlines(new)
@@ -2107,7 +2109,10 @@ def apply_patch(
         )
         replacements[target] = replacements.get(target, 0) + used
 
-    changed = [path for path in current if current[path] != originals[path]]
+    # 与归一化后的原文比较：CRLF 文件即使没有实际改动，也不应被误报为已修改。
+    changed = [
+        path for path in current if current[path] != normalized_originals[path]
+    ]
     if not changed:
         return "没有变化：所有 new_text 都与原文相同。"
 

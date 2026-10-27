@@ -370,6 +370,34 @@ class TestFileTools(unittest.TestCase):
         edit_file(f"{self.folder}/dup.txt", "x", "y", replace_all=True)
         self.assertIn("y y", read_file(f"{self.folder}/dup.txt"))
 
+    def test_edit_file_matches_lf_old_text_in_crlf_file(self):
+        self.directory.mkdir(parents=True, exist_ok=True)
+        target = self.directory / "crlf.txt"
+        target.write_bytes(b"alpha\r\nbeta\r\ngamma\r\n")
+
+        result = edit_file(
+            f"{self.folder}/crlf.txt",
+            "alpha\nbeta",
+            "alpha\nBETA",
+            context=ToolContext(permission_mode="auto"),
+        )
+
+        self.assertIn("替换 1 处", result)
+        self.assertEqual(target.read_bytes(), b"alpha\r\nBETA\r\ngamma\r\n")
+
+    def test_edit_file_keeps_lf_style_for_lf_file(self):
+        write_file(f"{self.folder}/lf.txt", "alpha\nbeta\ngamma\n")
+        target = self.directory / "lf.txt"
+
+        edit_file(
+            f"{self.folder}/lf.txt",
+            "beta\n",
+            "BETA\n",
+            context=ToolContext(permission_mode="auto"),
+        )
+
+        self.assertEqual(target.read_bytes(), b"alpha\nBETA\ngamma\n")
+
     def test_permission_denial_blocks_write_and_command(self):
         self.directory.mkdir(parents=True, exist_ok=True)
         context = ToolContext(request_tool_permission=lambda payload: False)
@@ -561,6 +589,45 @@ class TestFileTools(unittest.TestCase):
                 context=deny,
             )
         self.assertNotIn("BETA3", read_file(f"{self.folder}/a.txt"))
+
+    def test_apply_patch_matches_lf_old_text_in_crlf_file(self):
+        self.directory.mkdir(parents=True, exist_ok=True)
+        target = self.directory / "crlf_patch.txt"
+        target.write_bytes(b"alpha\r\nbeta\r\ngamma\r\n")
+
+        result = apply_patch(
+            [
+                {
+                    "path": f"{self.folder}/crlf_patch.txt",
+                    "old_text": "beta\ngamma",
+                    "new_text": "BETA\nGAMMA",
+                }
+            ],
+            context=ToolContext(permission_mode="auto"),
+        )
+
+        self.assertIn("修改 1 个文件", result)
+        self.assertEqual(target.read_bytes(), b"alpha\r\nBETA\r\nGAMMA\r\n")
+
+    def test_apply_patch_noop_on_crlf_file_reports_no_change(self):
+        self.directory.mkdir(parents=True, exist_ok=True)
+        target = self.directory / "crlf_noop.txt"
+        original = b"alpha\r\nbeta\r\ngamma\r\n"
+        target.write_bytes(original)
+
+        result = apply_patch(
+            [
+                {
+                    "path": f"{self.folder}/crlf_noop.txt",
+                    "old_text": "beta\n",
+                    "new_text": "beta\n",
+                }
+            ],
+            context=ToolContext(permission_mode="auto"),
+        )
+
+        self.assertIn("没有变化", result)
+        self.assertEqual(target.read_bytes(), original)
 
     def test_move_and_delete_file(self):
         write_file(f"{self.folder}/move_source.txt", "move-me")
