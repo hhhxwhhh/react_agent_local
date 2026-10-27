@@ -121,6 +121,75 @@ def _read_guard_reminder(key: str) -> str:
         "grep 定位目标行号，再用 start_line/end_line 定向读取必要区间。"
     )
 
+
+# 硬跳过阈值：本次请求区间与历史某次区间的重叠比例达到该值时，
+# 直接跳过实际读取并返回提示，从工具层打断盲读循环。
+READ_SKIP_OVERLAP_RATIO = 0.9
+# 最小跨度保护：本次请求区间跨度小于该行数时永远放行。
+# 小窗口定向读取（如 start_line=2,end_line=2）是合法且必要的，
+# 即使被历史大区间完全覆盖也不应硬跳过，否则会误伤精确读取。
+READ_SKIP_MIN_SPAN = 8
+# 归一化时用于表示“读到文件末尾”的哨兵上界。
+_INTERVAL_OPEN_END = 10 ** 9
+
+
+def _normalize_interval(first: int, last: int) -> tuple[int, int]:
+    """把 read_file 的 0 语义区间归一化为闭区间 [start, end]。
+
+    start_line=0 表示从第一行开始；end_line=0 表示读到文件末尾。
+    """
+    start = 1 if int(first or 0) <= 0 else int(first)
+    end = _INTERVAL_OPEN_END if int(last or 0) <= 0 else int(last)
+    if end < start:
+        end = start
+    return start, end
+
+
+def _overlap_ratio(
+    a: tuple[int, int], b: tuple[int, int]
+) -> float:
+    """计算区间 a 被区间 b 覆盖的比例（0.0-1.0）。"""
+    a_start, a_end = a
+    b_start, b_end = b
+    overlap = min(a_end, b_end) - max(a_start, b_start) + 1
+    if overlap <= 0:
+        return 0.0
+    span = a_end - a_start + 1
+    if span <= 0:
+        return 0.0
+    return min(1.0, overlap / span)
+
+
+def _read_skip_notice(key: str, first: int, last: int) -> str:
+    """读取前检查：若本次区间与历史区间高度重叠，返回硬跳过提示。
+
+    命中时调用方应直接返回该提示，不再实际读取文件，也不记录本次区间，
+    避免模型陷入“同一区间反复读取”的盲读循环。
+    """
+    history = _READ_HISTORY.get(key, [])
+    if not history:
+        return ""
+    # 整文件读取（未指定行区间）永远放行：这是最常见的合法用法，
+    # 且返回内容受 max_chars 限制，不会造成逐段盲读循环。
+    if int(first or 0) <= 0 and int(last or 0) <= 0:
+        return ""
+    current = _normalize_interval(first, last)
+    # 小窗口定向读取永远放行，避免误伤精确读取。
+    if current[1] - current[0] + 1 < READ_SKIP_MIN_SPAN:
+        return ""
+    for prev_first, prev_last in history:
+        prev = _normalize_interval(prev_first, prev_last)
+        if _overlap_ratio(current, prev) >= READ_SKIP_OVERLAP_RATIO:
+            return (
+                "[已跳过重复读取] 本次请求的行区间与之前已读取的区间高度重叠"
+                f"（第 {prev[0]}-{prev[1]} 行），内容已在之前的 Observation 中返回。"
+                "为避免盲读循环，本次未重复读取文件。请直接使用已有内容；"
+                "若需其他部分，请用 search_files（search_content=true）定位行号后"
+                "读取尚未覆盖的区间。"
+            )
+    return ""
+
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -1943,15 +2012,36 @@ def read_file(
     探索效率护栏：同一文件被反复读取且区间重叠/递增时，会在返回文本尾部
     追加系统提醒，引导改用 search_files 定位行号。
     """
-    result = _read_file_impl(path, max_chars, start_line, end_line)
     try:
         key = str(_resolve_path(path))
         first = int(start_line or 0)
         last = int(end_line or 0)
-        _record_read_interval(key, first, last)
-        reminder = _read_guard_reminder(key)
-        if reminder:
-            result += reminder
+        # 硬跳过：同一文件同一/高度重叠区间直接返回提示，不实际读取。
+        skip_notice = _read_skip_notice(key, first, last)
+        if skip_notice:
+            return skip_notice
+    except Exception:
+        # 护栏绝不能影响正常读取
+        key = None
+        first = last = 0
+
+    result = _read_file_impl(path, max_chars, start_line, end_line)
+    try:
+        if key is not None:
+            # 记录区间时把“开放末尾”哨兵替换为实际文件行数，避免
+            # (1, 10^9) 这类巨大区间污染历史、误伤后续定向读取。
+            rec_first, rec_last = _normalize_interval(first, last)
+            if rec_last >= _INTERVAL_OPEN_END:
+                try:
+                    total = len(_read_text_file(_resolve_path(path)).splitlines())
+                except Exception:
+                    total = 0
+                if total > 0:
+                    rec_last = total
+            _record_read_interval(key, rec_first, rec_last)
+            reminder = _read_guard_reminder(key)
+            if reminder:
+                result += reminder
     except Exception:
         # 护栏绝不能影响正常读取
         pass
