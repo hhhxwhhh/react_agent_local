@@ -842,6 +842,21 @@ def _similar(a: str, b: str) -> bool:
     return ratio >= 0.45
 
 
+def _bigram_overlap(a: str, b: str) -> float:
+    """按字符二元组衡量语义接近度，弥补 SequenceMatcher 对长句不敏感。"""
+
+    def signature(text: str) -> set[str]:
+        cleaned = re.sub(
+            r"[\s`*#，。；：、“”‘’（）()\[\]{}<>/\\|+=\-.,!?\"']+", "", str(text or "").lower()
+        )
+        return {cleaned[i : i + 2] for i in range(len(cleaned) - 1)}
+
+    left, right = signature(a), signature(b)
+    if not left or not right:
+        return 0.0
+    return len(left & right) / len(left | right)
+
+
 def _auto_objective() -> tuple[str, dict[str, Any]]:
     """用上一代自己的复盘建议生成下一代目标；没有可用建议时返回空串。"""
     entries = [
@@ -856,6 +871,13 @@ def _auto_objective() -> tuple[str, dict[str, Any]]:
     candidates = _next_suggestions(latest)
     recent = [str(entry.get("objective") or "") for entry in entries[-5:]]
     feasible = [item for item in candidates if _suggestion_is_feasible(item)]
+    # 上一代没有任何落盘改动时，不要继续复述同一个目标；
+    # 换成它复盘里的另一条具体建议，避免把错误前提带入下一代。
+    if "没有产生任何改动" in str(latest.get("reason") or ""):
+        previous = str(latest.get("objective") or "")
+        feasible = [
+            item for item in feasible if _bigram_overlap(item, previous) < 0.15
+        ]
     chosen = next(
         (item for item in feasible if not any(_similar(item, old) for old in recent)),
         "",
