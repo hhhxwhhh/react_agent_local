@@ -764,6 +764,26 @@ class TestLoopGuards(unittest.TestCase):
             any("只读探索" in event.get("text", "") for event in events)
         )
 
+    def test_run_tests_success_records_verification_status(self):
+        llm = FakeLLM(
+            [
+                "Thought: 运行测试。\nAction: run_tests\nAction Input: {}",
+                "Thought: 测试通过。\nFinal Answer: ok",
+            ]
+        )
+
+        def fake_run_tool(name, args, context=None):
+            if name == "run_tests":
+                return "测试目标：discover tests/\n目录：.\n结果：通过\n耗时：0.1s"
+            return agent_module.run_tool(name, args, context=context)
+
+        with patch.object(agent_module, "run_tool", side_effect=fake_run_tool):
+            agent = ReActAgent(llm, max_steps=3, verbose=False, use_color=False)
+            answer = agent.run("跑一下测试")
+
+        self.assertEqual(answer, "ok")
+        self.assertEqual(agent.verification_status, "通过")
+
     def test_repeated_invalid_output_stops_early(self):
         llm = FakeLLM(
             [

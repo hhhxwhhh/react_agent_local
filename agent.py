@@ -1076,8 +1076,10 @@ class ReActAgent:
                     else:
                         read_only_streak += 1
                     if tool_name == "run_tests":
+                        # run_tests 返回“结果：通过/失败”，与 run_command 的
+                        # “退出码：0”格式不同，不能复用 _command_succeeded。
                         self.verification_status = (
-                            "通过" if _command_succeeded(observation) else "失败"
+                            "通过" if "结果：通过" in observation else "失败"
                         )
 
                 if (
