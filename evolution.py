@@ -800,7 +800,11 @@ def _next_suggestions(entry: dict[str, Any], limit: int = 5) -> list[str]:
 
 
 def _suggestion_is_feasible(text: str) -> bool:
-    """过滤需要改 tests/ 或只改文档的建议；这两类在当前冻结边界下不可执行。"""
+    """过滤不可执行或无动作的建议。
+
+    需要改 tests/ 或只改文档的建议在当前冻结边界下不可执行；
+    以“本代/这一代”开头的句子是复盘评论，不是下一代要做的事。
+    """
     lowered = str(text or "").lower()
     blocked = (
         "tests/",
@@ -812,7 +816,24 @@ def _suggestion_is_feasible(text: str) -> bool:
         "文档",
         "docs/",
     )
-    return not any(term in lowered for term in blocked)
+    if any(term in lowered for term in blocked):
+        return False
+    head = str(text or "").lstrip("*`# ").strip()
+    if head.startswith(("本代", "这一代", "本次")):
+        return False
+    return True
+
+
+def _similar(a: str, b: str) -> bool:
+    """判断两条目标是否实质重复，避免连续几代反复做同一件事。"""
+    from difflib import SequenceMatcher
+
+    left, right = _one_line(str(a or ""), 240), _one_line(str(b or ""), 240)
+    if not left or not right:
+        return False
+    if left in right or right in left:
+        return True
+    return SequenceMatcher(None, left, right).ratio() >= 0.6
 
 
 def _auto_objective() -> tuple[str, dict[str, Any]]:
@@ -827,12 +848,12 @@ def _auto_objective() -> tuple[str, dict[str, Any]]:
 
     latest = entries[-1]
     candidates = _next_suggestions(latest)
-    recent = {
-        _one_line(str(entry.get("objective") or ""), 240)
-        for entry in entries[-5:]
-    }
+    recent = [str(entry.get("objective") or "") for entry in entries[-5:]]
     feasible = [item for item in candidates if _suggestion_is_feasible(item)]
-    chosen = next((item for item in feasible if item not in recent), "")
+    chosen = next(
+        (item for item in feasible if not any(_similar(item, old) for old in recent)),
+        "",
+    )
     info = {
         "source": f"gen-{latest.get('generation', '?')}-retrospective",
         "generation": latest.get("generation"),
