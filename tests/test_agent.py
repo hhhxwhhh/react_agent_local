@@ -339,6 +339,17 @@ class TestFileTools(unittest.TestCase):
         with self.assertRaises(ValueError):
             read_file(path, start_line=3, end_line=2)
 
+    def test_read_file_after_edit_is_not_hard_skipped(self):
+        path = f"{self.folder}/refresh.txt"
+        write_file(path, "\n".join(f"line{i}" for i in range(1, 21)))
+        first = read_file(path, start_line=1, end_line=10)
+        self.assertIn("line1", first)
+
+        edit_file(path, "line5", "LINE5")
+        second = read_file(path, start_line=1, end_line=10)
+        self.assertNotIn("已跳过重复读取", second)
+        self.assertIn("LINE5", second)
+
     def test_workspace_mode_escape_blocked(self):
         with patch.object(tools, "FILE_ACCESS_MODE", "workspace"):
             with self.assertRaises(ValueError):

@@ -85,6 +85,11 @@ def reset_read_history() -> None:
     _READ_HISTORY.clear()
 
 
+def _forget_read_history(target: Path) -> None:
+    """文件内容变化后，之前的读取记录已过期，清掉该文件的区间历史。"""
+    _READ_HISTORY.pop(str(target), None)
+
+
 def _record_read_interval(key: str, first: int, last: int) -> int:
     """记录一次读取区间，返回该文件累计读取次数。"""
     # 先移除再插入，使该 key 成为“最近使用”，配合容量淘汰实现近似 LRU。
@@ -2151,6 +2156,7 @@ def write_file(
     target.parent.mkdir(parents=True, exist_ok=True)
     with target.open("a" if append else "w", encoding="utf-8", newline="\n") as handle:
         handle.write(text)
+    _forget_read_history(target)
 
     return (
         f"已{action}：{_display_path(target)}"
@@ -2208,6 +2214,7 @@ def edit_file(
     updated = _restore_newlines(updated, newline)
     with target.open("w", encoding="utf-8", newline="") as handle:
         handle.write(updated)
+    _forget_read_history(target)
 
     return (
         f"已编辑：{_display_path(target)}"
@@ -2319,6 +2326,7 @@ def apply_patch(
         for path in changed:
             _atomic_write_text(path, _restore_newlines(current[path], newlines[path]))
             written.append(path)
+            _forget_read_history(path)
     except Exception:
         # 多文件不是严格事务，但至少把已经写过的文件恢复原状。
         for path in written:
