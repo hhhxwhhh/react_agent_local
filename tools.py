@@ -64,13 +64,38 @@ MAX_OBSERVATION_CHARS = 12000
 # 说明模型可能陷入“盲目逐段读取”的循环。此时在返回文本尾部追加一条
 # 系统提醒，引导模型改用 search_files 定位行号后定向读取。
 READ_REPEAT_THRESHOLD = 3
+# 容量上限：长驻进程（如 Web server）中 _READ_HISTORY 会随读取过的文件数
+# 无限增长。这里限制最多追踪多少个文件 key，超出时按“最久未读取”淘汰，
+# 避免内存缓慢泄漏；单个文件的历史区间也做长度上限，防止极端情况下膨胀。
+READ_HISTORY_MAX_FILES = 256
+READ_HISTORY_MAX_INTERVALS = 32
 _READ_HISTORY: dict[str, list[tuple[int, int]]] = {}
+
+
+def _evict_read_history_if_needed() -> None:
+    """当追踪的文件数超过上限时，淘汰最久未读取的 key。"""
+    while len(_READ_HISTORY) > READ_HISTORY_MAX_FILES:
+        # dict 保持插入顺序；重新读取会先 pop 再插入，因此队首即最久未用。
+        oldest = next(iter(_READ_HISTORY))
+        _READ_HISTORY.pop(oldest, None)
+
+
+def reset_read_history() -> None:
+    """清空读取历史。供会话结束/长驻进程定期清理时显式调用。"""
+    _READ_HISTORY.clear()
 
 
 def _record_read_interval(key: str, first: int, last: int) -> int:
     """记录一次读取区间，返回该文件累计读取次数。"""
-    history = _READ_HISTORY.setdefault(key, [])
+    # 先移除再插入，使该 key 成为“最近使用”，配合容量淘汰实现近似 LRU。
+    history = _READ_HISTORY.pop(key, None)
+    if history is None:
+        history = []
     history.append((first, last))
+    if len(history) > READ_HISTORY_MAX_INTERVALS:
+        del history[:-READ_HISTORY_MAX_INTERVALS]
+    _READ_HISTORY[key] = history
+    _evict_read_history_if_needed()
     return len(history)
 
 
