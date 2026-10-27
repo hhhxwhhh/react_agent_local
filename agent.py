@@ -1056,7 +1056,11 @@ class ReActAgent:
                         )
                         # 工具层硬跳过与循环层联动：连续多次被硬跳过时，
                         # 直接注入系统消息，强制模型改用 search_files 定位。
-                        skip_streak = consume_read_skip_streak()
+                        # 与 tools.py 中 read_file 的计数 key 保持一致：
+                        # 用当前会话 ID 消费，否则会读到 None 键导致联动失效。
+                        skip_streak = consume_read_skip_streak(
+                            getattr(self.tool_context, "session_id", None)
+                        )
                         if skip_streak >= 2:
                             observation += (
                                 "\n[系统提示] 你已连续 "
