@@ -937,6 +937,13 @@ _FAILURE_KEYWORDS: dict[str, tuple[str, ...]] = {
         "工具结果不可见",
         "Observation 不可见",
     ),
+    "false_observation_claim": (
+        "轨迹",
+        "Observation",
+        "一致性",
+        "返回空",
+        "不可见",
+    ),
     "blind_read_loop": ("read_file", "读取", "search_files", "行号", "盲读"),
     "duplicate_actions": ("重复", "同一命令", "原样重复"),
     "test_failure": ("测试失败", "回归测试"),
@@ -1019,6 +1026,9 @@ def _trace_metrics(trace: list[dict[str, Any]]) -> dict[str, Any]:
         for item in actions
         if str(item.get("observation") or "").lstrip().startswith("ERROR")
     )
+    nonempty_observations = sum(
+        1 for item in actions if str(item.get("observation") or "").strip()
+    )
     return {
         "actions": len(actions),
         "read_calls": read_calls,
@@ -1027,8 +1037,44 @@ def _trace_metrics(trace: list[dict[str, Any]]) -> dict[str, Any]:
         "duplicate_reads": duplicate_reads,
         "skipped_reads": skipped_reads,
         "tool_errors": tool_errors,
+        "nonempty_observations": nonempty_observations,
         "zero_tool": not actions,
     }
+
+
+def _load_trace_steps(trace_file: Any) -> list[dict[str, Any]]:
+    if not isinstance(trace_file, str) or not trace_file:
+        return []
+    path = ROOT / trace_file
+    if not path.is_file():
+        return []
+    steps: list[dict[str, Any]] = []
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                item = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(item, dict) and item.get("type") == "step":
+                steps.append(item)
+    except OSError:
+        return []
+    return steps
+
+
+def _hydrate_metrics(record: dict[str, Any]) -> dict[str, Any]:
+    """旧记录可能缺少新指标；必要时从 trace 重新计算，保证诊断基于轨迹。"""
+    agent = record.get("agent")
+    agent = agent if isinstance(agent, dict) else {}
+    metrics = agent.get("metrics")
+    metrics = metrics if isinstance(metrics, dict) else {}
+    if "nonempty_observations" in metrics:
+        return metrics
+    steps = _load_trace_steps(agent.get("trace_file"))
+    if steps:
+        metrics = _trace_metrics(steps)
+        agent["metrics"] = metrics
+    return metrics
 
 
 def _component_from_files(paths: list[str]) -> str:
@@ -1083,6 +1129,28 @@ def _claims_edit(answer: str) -> bool:
     )
 
 
+_OBSERVATION_FAILURE_PATTERNS = (
+    r"Observation[^\n。；]{0,40}(?:完全不可见|不可见|为空|返回空)",
+    r"观测链路[^\n。；]{0,20}(?:失效|不可用|中断)",
+    r"(?:所有|全部)工具[^\n。；]{0,50}(?:返回空|空内容|无返回)",
+    r"工具(?:结果|返回)[^\n。；]{0,20}(?:不可见|看不到|为空)",
+)
+
+
+def _claims_observation_failure(text: str) -> bool:
+    """判断最终答案是否声称工具 Observation 完全不可见/为空。"""
+    value = str(text or "")
+    return any(re.search(pattern, value) for pattern in _OBSERVATION_FAILURE_PATTERNS)
+
+
+def _assumes_broken_observations(text: str) -> bool:
+    """判断一条建议是否建立在“观测链路坏了”这个前提上。"""
+    value = str(text or "")
+    if _claims_observation_failure(value):
+        return True
+    return bool(re.search(r"观测(?:链路|恢复|失效|不可用)", value))
+
+
 def _final_section(answer: str, title: str) -> str:
     match = re.search(
         rf"^\s*(?:[-*]|\d+[.)、])?\s*\**\s*{re.escape(title)}\s*\**\s*[：:]\s*(.+)$",
@@ -1101,8 +1169,7 @@ def _diagnose_generation(record: dict[str, Any]) -> dict[str, Any]:
     agent = agent if isinstance(agent, dict) else {}
     candidate = record.get("candidate")
     candidate = candidate if isinstance(candidate, dict) else {}
-    metrics = agent.get("metrics")
-    metrics = metrics if isinstance(metrics, dict) else {}
+    metrics = _hydrate_metrics(record)
     changed = [str(path) for path in candidate.get("changed_files") or []]
     answer = str(agent.get("final_answer") or "")
 
@@ -1119,6 +1186,10 @@ def _diagnose_generation(record: dict[str, Any]) -> dict[str, Any]:
             for term in ("没有返回 Observation", "工具都没有返回", "Observation 不可见")
         ):
             modes.append("zero_tool_final")
+        if _claims_observation_failure(answer) and int(
+            metrics.get("nonempty_observations") or 0
+        ) > 0:
+            modes.append("false_observation_claim")
         if int(metrics.get("duplicate_actions") or 0) >= 2:
             modes.append("duplicate_actions")
         if int(metrics.get("skipped_reads") or 0) >= 1 or int(
@@ -1307,6 +1378,12 @@ def _score_proposal(
 # 只给“还没有硬护栏”的失败模式准备诊断提案，避免重复已经实现的能力
 # （例如 read_file 硬跳过、零工具调用退回、重复动作去重都已经存在）。
 _DIAGNOSTIC_PROPOSALS: dict[str, str] = {
+    "false_observation_claim": (
+        "在 `agent.py` 的 Final Answer 处理中加入轨迹一致性校验："
+        "若答案声称所有工具 Observation 为空或不可见，但本代轨迹中存在非空"
+        " Observation，则退回答案，并把真实 Observation 摘要重新注入，"
+        "要求基于实际结果继续。"
+    ),
     "claimed_without_edit": (
         "在 `agent.py` 的 Final Answer 处理中加入自进化落盘校验："
         "若答案声称改动了文件，但 `git diff --stat` 为空，则退回该答案并要求"
@@ -1322,8 +1399,8 @@ _DIAGNOSTIC_PROPOSALS: dict[str, str] = {
 def _diagnostic_proposals(record: dict[str, Any]) -> list[str]:
     """从一代的失败诊断直接生成候选改动，作为复评为空时的兜底。"""
     diagnosis = _diagnose_generation(record)
-    # 按 _DIAGNOSTIC_PROPOSALS 的声明顺序输出：更具体的“声称已改但未落盘”
-    # 排在泛化的“没有改动”之前，避免兜底提案只处理表层症状。
+    # 按 _DIAGNOSTIC_PROPOSALS 的声明顺序输出：先处理“错误声称观测为空”
+    # 和“声称已改但未落盘”，再处理泛化的“没有改动”，避免只治表层症状。
     modes = set(diagnosis["failure_modes"])
     return [
         text for mode, text in _DIAGNOSTIC_PROPOSALS.items() if mode in modes
@@ -1350,6 +1427,13 @@ def _auto_objective() -> tuple[str, dict[str, Any]]:
         previous = str(latest.get("objective") or "")
         feasible = [
             item for item in feasible if _bigram_overlap(item, previous) < 0.15
+        ]
+    # 如果轨迹证明 Observation 并非为空，就不要采纳“修复观测链路”这类
+    # 基于错误前提的复盘建议，改用诊断兜底提案。
+    latest_diagnosis = _diagnose_generation(latest)
+    if "false_observation_claim" in latest_diagnosis["failure_modes"]:
+        feasible = [
+            item for item in feasible if not _assumes_broken_observations(item)
         ]
     experience = _read_experience()
     proposals = []
@@ -2207,26 +2291,6 @@ def show_status() -> int:
     return 0
 
 
-def _load_trace_steps(trace_file: Any) -> list[dict[str, Any]]:
-    if not isinstance(trace_file, str) or not trace_file:
-        return []
-    path = ROOT / trace_file
-    if not path.is_file():
-        return []
-    steps: list[dict[str, Any]] = []
-    try:
-        for line in path.read_text(encoding="utf-8").splitlines():
-            try:
-                item = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(item, dict) and item.get("type") == "step":
-                steps.append(item)
-    except OSError:
-        return []
-    return steps
-
-
 def rebuild_experience() -> int:
     """从已有 ledger 与 trace 重建经验库，供本地数据丢失后恢复。"""
     entries = [
@@ -2245,10 +2309,10 @@ def rebuild_experience() -> int:
         if not isinstance(agent, dict):
             agent = {}
             entry["agent"] = agent
-        if not agent.get("metrics"):
-            steps = _load_trace_steps(agent.get("trace_file"))
-            if steps:
-                agent["metrics"] = _trace_metrics(steps)
+        steps = _load_trace_steps(agent.get("trace_file"))
+        if steps:
+            # 始终以 trace 为准重算，确保旧记录也能得到新增指标。
+            agent["metrics"] = _trace_metrics(steps)
         _append_experience(_experience_entry(entry))
         count += 1
     print(f"已回填 {count} 条经验：{EXPERIENCE_FILE}")

@@ -180,6 +180,7 @@ class TestEvolutionHelpers(unittest.TestCase):
         self.assertEqual(metrics["duplicate_reads"], 1)
         self.assertEqual(metrics["skipped_reads"], 1)
         self.assertEqual(metrics["tool_errors"], 1)
+        self.assertEqual(metrics["nonempty_observations"], 5)
         self.assertFalse(metrics["zero_tool"])
         self.assertTrue(evolution._trace_metrics([])["zero_tool"])
 
@@ -209,6 +210,34 @@ class TestEvolutionHelpers(unittest.TestCase):
         self.assertIn("no_change", diagnosis["failure_modes"])
         self.assertIn("claimed_without_edit", diagnosis["failure_modes"])
         self.assertEqual(diagnosis["component"], "agent_loop")
+
+    def test_diagnose_false_observation_claim(self):
+        record = {
+            "generation": 21,
+            "decision": "rejected",
+            "objective": "给 read_file 增加连续大区间拦截",
+            "reason": "Agent 没有产生任何改动",
+            "candidate": {"changed_files": []},
+            "agent": {
+                "final_answer": (
+                    "所有工具的 Observation 均返回空内容，观测链路完全失效。"
+                ),
+                "metrics": {
+                    "actions": 5,
+                    "read_calls": 1,
+                    "write_calls": 0,
+                    "duplicate_actions": 0,
+                    "duplicate_reads": 0,
+                    "skipped_reads": 1,
+                    "tool_errors": 0,
+                    "nonempty_observations": 5,
+                    "zero_tool": False,
+                },
+            },
+        }
+        diagnosis = evolution._diagnose_generation(record)
+        self.assertIn("false_observation_claim", diagnosis["failure_modes"])
+        self.assertIn("no_change", diagnosis["failure_modes"])
 
     def test_experience_library_roundtrip_and_dedup(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -352,6 +381,46 @@ class TestEvolutionHelpers(unittest.TestCase):
         self.assertEqual(info["proposal_source"], "diagnosis-fallback")
         self.assertIn("Final Answer", chosen)
         self.assertIn("git diff --stat", chosen)
+
+    def test_auto_objective_ignores_false_observation_premise(self):
+        latest = {
+            "generation": 21,
+            "decision": "rejected",
+            "objective": "旧目标",
+            "reason": "Agent 没有产生任何改动",
+            "candidate": {"changed_files": []},
+            "agent": {
+                "final_answer": (
+                    "Final Answer:\n"
+                    "- 对下一代 Harness 的建议：\n"
+                    "1. 优先修复观测链路，所有工具 Observation 完全不可见\n"
+                    "2. 观测恢复后再做连续大区间拦截\n"
+                ),
+                "metrics": {
+                    "actions": 5,
+                    "read_calls": 1,
+                    "write_calls": 0,
+                    "duplicate_actions": 0,
+                    "duplicate_reads": 0,
+                    "skipped_reads": 1,
+                    "tool_errors": 0,
+                    "nonempty_observations": 5,
+                    "zero_tool": False,
+                },
+            },
+        }
+        entries = [
+            {"generation": 20, "decision": "accepted", "objective": "上一目标"},
+            latest,
+        ]
+        with patch.object(evolution, "_read_ledger", return_value=entries), patch.object(
+            evolution, "_read_experience", return_value=[]
+        ):
+            chosen, info = evolution._auto_objective()
+
+        self.assertEqual(info["proposal_source"], "diagnosis-fallback")
+        self.assertIn("轨迹一致性", chosen)
+        self.assertNotIn("修复观测链路", chosen)
 
     def test_generation_history_summary(self):
         entries = [
