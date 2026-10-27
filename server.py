@@ -32,6 +32,7 @@ from config import (
     MAX_CONCURRENT_RUNS,
     MAX_STEPS,
     REQUIRE_TOOL_APPROVAL,
+    TOOL_PERMISSION_MODE,
     TOOL_PERMISSION_TIMEOUT,
 )
 from llm import DeepSeekLLM, LLMError
@@ -520,6 +521,9 @@ def chat(body: ChatRequest) -> StreamingResponse:
                 request_user_location=request_user_location,
                 request_tool_permission=(
                     request_tool_permission if REQUIRE_TOOL_APPROVAL else None
+                ),
+                permission_mode=(
+                    TOOL_PERMISSION_MODE if REQUIRE_TOOL_APPROVAL else "ask"
                 ),
             )
             agent = ReActAgent(

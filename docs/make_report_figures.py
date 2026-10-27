@@ -223,7 +223,7 @@ def figure_architecture():
 
 def figure_tests():
     rows = [
-        ("test_agent.py", "ReAct 循环 / 解析 / 工具", 63),
+        ("test_agent.py", "ReAct 循环 / 解析 / 工具", 68),
         ("test_sessions.py", "会话 / 记忆 / Web API", 36),
         ("test_vector_memory.py", "向量检索 / 位置与地理", 28),
         ("test_memory.py", "记忆并发 / TTL / 容量", 13),
@@ -256,7 +256,7 @@ def figure_tests():
             color=INK,
         )
 
-    fig.text(0.06, 0.93, "离线测试分布：153 个用例", fontsize=20, fontweight="bold", color=INK)
+    fig.text(0.06, 0.93, "离线测试分布：158 个用例", fontsize=20, fontweight="bold", color=INK)
     fig.text(
         0.06,
         0.865,
@@ -267,7 +267,7 @@ def figure_tests():
     fig.text(
         0.92,
         0.80,
-        "152 通过\n1 跳过",
+        "157 通过\n1 跳过",
         ha="right",
         va="top",
         fontsize=13,

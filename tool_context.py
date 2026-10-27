@@ -20,3 +20,6 @@ class ToolContext:
     # 写文件、编辑文件、执行命令前的确认回调。接收一个描述操作的 dict，
     # 返回 True 表示允许一次，False 表示拒绝。为 None 时不弹授权（脚本/测试）。
     request_tool_permission: Callable[[dict], bool] | None = None
+    # 授权模式：ask（每步询问）、edits（自动接受项目内修改和只读命令）、
+    # auto（项目内自动放行）、readonly（拒绝所有写操作）。
+    permission_mode: str = "ask"

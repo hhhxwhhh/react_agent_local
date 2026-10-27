@@ -398,6 +398,64 @@ class TestFileTools(unittest.TestCase):
         self.assertIn("permission-ok", result)
         self.assertIn("退出码：0", result)
 
+    def test_auto_permission_mode_approves_project_edits_without_prompt(self):
+        prompts: list[dict] = []
+        context = ToolContext(
+            permission_mode="auto",
+            request_tool_permission=lambda payload: prompts.append(payload) or False,
+        )
+        message = write_file(
+            f"{self.folder}/auto.txt", "auto-ok", context=context
+        )
+        self.assertIn("已写入", message)
+        self.assertEqual(prompts, [])
+
+    def test_edits_permission_mode_asks_for_unsafe_command(self):
+        self.directory.mkdir(parents=True, exist_ok=True)
+        prompts: list[dict] = []
+        context = ToolContext(
+            permission_mode="edits",
+            request_tool_permission=lambda payload: prompts.append(payload) or False,
+        )
+        with self.assertRaises(PermissionError):
+            run_command("echo unsafe", cwd=str(self.directory), context=context)
+        self.assertEqual(len(prompts), 1)
+        self.assertEqual(prompts[0]["tool"], "run_command")
+
+    def test_auto_permission_mode_denies_destructive_command(self):
+        self.directory.mkdir(parents=True, exist_ok=True)
+        prompts: list[dict] = []
+        context = ToolContext(
+            permission_mode="auto",
+            request_tool_permission=lambda payload: prompts.append(payload) or True,
+        )
+        with self.assertRaises(PermissionError):
+            run_command("rm -rf /", cwd=str(self.directory), context=context)
+        self.assertEqual(prompts, [])
+
+    def test_readonly_permission_mode_denies_write(self):
+        context = ToolContext(
+            permission_mode="readonly",
+            request_tool_permission=lambda payload: True,
+        )
+        with self.assertRaises(PermissionError):
+            write_file(f"{self.folder}/readonly.txt", "no", context=context)
+        self.assertFalse((self.directory / "readonly.txt").exists())
+
+    def test_auto_permission_mode_asks_outside_project(self):
+        prompts: list[dict] = []
+        context = ToolContext(
+            permission_mode="auto",
+            request_tool_permission=lambda payload: prompts.append(payload) or False,
+        )
+        with tempfile.TemporaryDirectory() as outside:
+            target = Path(outside) / "outside.txt"
+            with self.assertRaises(PermissionError):
+                write_file(str(target), "no", context=context)
+            self.assertFalse(target.exists())
+        self.assertEqual(len(prompts), 1)
+        self.assertEqual(prompts[0]["tool"], "write_file")
+
     def test_search_files_by_content_and_name(self):
         write_file(f"{self.folder}/docs/weather.md", "上海今天有雨\nPM2.5 良好")
 

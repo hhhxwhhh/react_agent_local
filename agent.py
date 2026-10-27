@@ -31,6 +31,7 @@ from config import (
     HISTORY_SUMMARY_BATCH_MESSAGES,
     MAX_STEPS,
     REQUIRE_TOOL_APPROVAL,
+    TOOL_PERMISSION_MODE,
 )
 from llm import DeepSeekLLM, LLMError
 from memory import GLOBAL_MEMORY_FILE, JsonMemory, format_memory_context
@@ -1167,9 +1168,19 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--temperature", type=float, default=0.2, help="采样温度")
     parser.add_argument("--no-color", action="store_true", help="关闭彩色输出")
     parser.add_argument(
+        "--permission-mode",
+        choices=("ask", "edits", "auto", "readonly"),
+        default=TOOL_PERMISSION_MODE,
+        help=(
+            "工具授权模式：ask 每步询问；edits 自动接受项目内编辑和只读命令；"
+            "auto 项目内自动放行并拒绝危险命令；readonly 拒绝所有写操作。"
+            f"默认 {TOOL_PERMISSION_MODE}"
+        ),
+    )
+    parser.add_argument(
         "--yes",
         action="store_true",
-        help="自动允许写文件、编辑/移动/删除、运行测试、Git 写操作和命令执行（高风险，仅限受信任任务）",
+        help="完全跳过授权模式，自动允许所有工具（高风险，仅限受信任任务）",
     )
     parser.add_argument(
         "--check-tools", action="store_true", help="只检查本地工具，不需要 API Key"
@@ -1194,8 +1205,10 @@ def _confirm_tool_permission(payload: dict) -> bool:
 
 def _make_agent(args: argparse.Namespace, use_color: bool) -> ReActAgent:
     llm = DeepSeekLLM(model=args.model, temperature=args.temperature)
-    context = ToolContext(default_scope="global")
-    if REQUIRE_TOOL_APPROVAL and not getattr(args, "yes", False):
+    bypass = bool(getattr(args, "yes", False))
+    mode = "ask" if bypass or not REQUIRE_TOOL_APPROVAL else args.permission_mode
+    context = ToolContext(default_scope="global", permission_mode=mode)
+    if REQUIRE_TOOL_APPROVAL and not bypass:
         context.request_tool_permission = _confirm_tool_permission
     return ReActAgent(
         llm=llm,

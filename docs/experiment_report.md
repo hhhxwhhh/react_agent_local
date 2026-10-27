@@ -80,7 +80,7 @@ Thought → Action → Observation → Thought → ... → Final Answer
 - **外部 API**：Open-Meteo 天气、必应搜索；空气质量与汇率函数仍保留在内部库中，但未注册给模型。
 - **交互层**：CLI 与本地 Web 聊天界面（FastAPI + SSE）。
 
-当前动作空间共注册 15 个工具，本实验重点使用 `get_weather`、`web_search`、`fetch_url`、`write_file`；`apply_patch`、`run_tests`、`git` 与 `run_command` 用于本机文件修改、代码执行和自进化验证，写操作调用前需用户授权。
+当前动作空间共注册 15 个工具，本实验重点使用 `get_weather`、`web_search`、`fetch_url`、`write_file`；`apply_patch`、`run_tests`、`git` 与 `run_command` 用于本机文件修改、代码执行和自进化验证，写操作按 `permissions.py` 的分级策略自动放行或请求用户授权。
 
 #### 3.2 ReAct 循环
 
@@ -206,7 +206,7 @@ TOOL_FUNCS["get_weather"] = get_weather
 | 单次输出上限 | 2048 tokens |
 | 天气 / 空气质量 | Open-Meteo 公开 API |
 | 工具数量 | 21 |
-| 离线测试 | 153 个用例 |
+| 离线测试 | 158 个用例 |
 
 #### 4.2 工具自检
 
@@ -331,15 +331,15 @@ python -m unittest discover -s tests -v
 结果：
 
 ```text
-Ran 153 tests in 7.984s
+Ran 158 tests in 7.984s
 OK (skipped=1)
 ```
 
-153 个用例中 152 个通过，1 个符号链接用例因 Windows 权限跳过。覆盖 ReAct 解析与循环、工具安全、文件访问与命令执行、Git 与测试运行、自进化裁判与安全沙箱、SSRF 拦截、记忆并发与 TTL、上下文压缩、会话隔离、SSE、位置授权、工具授权、地理查询等。
+158 个用例中 157 个通过，1 个符号链接用例因 Windows 权限跳过。覆盖 ReAct 解析与循环、工具安全、文件访问与命令执行、Git 与测试运行、自进化裁判与安全沙箱、SSRF 拦截、记忆并发与 TTL、上下文压缩、会话隔离、SSE、位置授权、工具授权、地理查询等。
 
 ![图2 离线测试分布](figures/fig2_test_coverage.png)
 
-*图2：153 个离线用例的分布。*
+*图2：158 个离线用例的分布。*
 
 ---
 
@@ -361,7 +361,7 @@ OK (skipped=1)
 | 重复调用 | 反复调用同一个工具 | `(工具名, 参数)` 去重 |
 | 无限循环 | 一直不给出 Final Answer | `MAX_STEPS=8`，超限强制收口 |
 | 工具异常 | 网络错误、参数错误 | `run_tool` 捕获异常，转成 ERROR Observation |
-| 高危本机操作 | 误写文件、执行破坏性命令 | 写/编辑/命令调用前由用户一次性授权；提示词限制高危命令；命令超时终止进程树 |
+| 高危本机操作 | 误写文件、执行破坏性命令 | `auto` 项目内自动放行、项目外确认并拒绝明显危险命令；`ask`/`edits` 可收紧；命令超时终止进程树 |
 | 工具选错 | 该查天气却查汇率 | 工具描述 + schema；仍需在评测中继续优化 |
 | 成本过高 | 多轮调用、token 增长 | 上下文压缩、Observation 截断、最大步数 |
 
@@ -369,7 +369,7 @@ OK (skipped=1)
 
 - 这是一个**机制复现**，不是 ReAct 论文的指标复现；没有公开 benchmark、baseline 和统计检验。
 - 当前有 15 个工具，仍多于论文通常的受控动作空间；工具数量本身会增加工具选择难度，不能把实验结果直接归因于“ReAct 更强”。
-- 默认允许文件工具访问本机任意路径，`run_command` 以当前用户权限执行命令；现有防护是用户确认和提示词约束，不是权限沙箱。
+- 默认允许文件工具访问本机任意路径，`run_command` 以当前用户权限执行命令；现有防护是分级自动放行/用户确认和提示词约束，不是权限沙箱。
 - 模型仍然是云端 DeepSeek API，不是本地权重；“本地”指 Agent 循环、工具和 Web 服务在本机。
 - 使用文本协议而不是原生 function calling；没有并行工具调用。
 - 记忆系统、上下文压缩等能力已经实现，但本实验没有做消融，不能单独量化它们的贡献。
@@ -450,7 +450,7 @@ python -m unittest discover -s tests -v
 | `vector_memory.py` | 本地特征哈希向量索引 |
 | `storage.py` | 共享路径锁 + JSON 原子写入 |
 | `sessions.py` | 会话持久化 |
-| `tests/` | 153 个离线测试 |
+| `tests/` | 158 个离线测试 |
 
 ### 附录 B：完整天气任务轨迹
 

@@ -51,6 +51,7 @@ from memory import (
     remember_entry,
     search_memory_entry,
 )
+from permissions import decide_permission, normalize_mode
 from tool_context import ToolContext
 
 REQUEST_TIMEOUT = 15
@@ -1755,11 +1756,17 @@ def _request_permission(
     detail: str,
     **extra: Any,
 ) -> None:
-    """在写文件、编辑文件或执行命令前请求用户确认。"""
+    """按授权模式决定自动放行、直接拒绝，还是交给用户确认。"""
+    payload = {"tool": tool, "title": title, "detail": detail, **extra}
+    mode = normalize_mode(getattr(context, "permission_mode", "ask"))
+    decision = decide_permission(payload, mode, root=FILE_ROOT)
+    if decision is False:
+        raise PermissionError(f"当前授权模式（{mode}）拒绝了本次操作：{tool}")
+    if decision is True:
+        return
     requester = getattr(context, "request_tool_permission", None)
     if requester is None:
         return
-    payload = {"tool": tool, "title": title, "detail": detail, **extra}
     if not requester(payload):
         raise PermissionError("用户拒绝了本次操作")
 

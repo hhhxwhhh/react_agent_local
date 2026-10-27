@@ -94,8 +94,10 @@ LOCATION_PERMISSION_TIMEOUT=90
 # unrestricted：绝对路径均可访问；workspace：退回旧的文件沙箱
 FILE_ACCESS_MODE=unrestricted
 # FILE_ROOT=             # 相对路径的基准目录，默认项目根目录
-# 写文件/编辑文件/执行命令前是否需要用户确认
+# 工具授权：ask 每步询问；edits 自动接受项目内编辑和只读命令；
+# auto 项目内自动放行并拒绝明显危险命令；readonly 拒绝所有写操作
 REQUIRE_TOOL_APPROVAL=true
+TOOL_PERMISSION_MODE=auto
 TOOL_PERMISSION_TIMEOUT=120
 # 单次命令超时（秒）与输出截断长度
 COMMAND_TIMEOUT=120
@@ -204,13 +206,17 @@ CLI 交互模式会在当前进程内保留最近 10 轮对话，并支持：
 
 ```bash
 python agent.py --max-steps 10 --model deepseek-chat --no-color "问题"
-# 信任当前任务时跳过本机写操作与命令执行的终端确认
+# 默认 auto：项目内编辑、测试和命令自动执行，不再逐步询问
+python agent.py "重构 demo/ 下的脚本并运行测试"
+# 想恢复逐步确认
+python agent.py --permission-mode ask "重构 demo/ 下的脚本并运行测试"
+# 完全跳过授权策略（高风险）
 python agent.py --yes "重构 demo/ 下的脚本并运行测试"
 ```
 
-CLI 在 `write_file` / `apply_patch` / `run_tests` / `git` 写操作 / `run_command`
-前会打印目标路径、命令或 Git 操作，并等待 `y/N`；输入非 `y`、直接回车、
-`Ctrl+C` 或 `Ctrl+D` 都按拒绝处理。
+`auto` 模式下，项目内路径直接放行；项目外路径、Git 写操作等按策略决定是否
+弹出确认。需要询问时，CLI 会打印目标路径、命令或 Git 操作并等待 `y/N`；
+输入非 `y`、直接回车、`Ctrl+C` 或 `Ctrl+D` 都按拒绝处理。
 `--yes` 只跳过工具授权，不影响 `get_location` 的定位授权流程。
 
 ### 3.3 自进化 Harness
@@ -393,7 +399,21 @@ Question ───────>│  DeepSeek（system + scratchpad）│
 
 ### 工具权限（写文件 / 编辑 / 测试 / Git / 命令）
 
-与定位授权类似，高风险工具由调用触发一次性授权：
+授权不再默认“每一步都问”，而是按 [permissions.py](permissions.py) 的策略分级：
+
+| 模式 | 项目内文件修改 | 项目内命令 | Git 写操作 | 项目外路径 | 明显危险命令 |
+|---|---|---|---|---|---|
+| `ask` | 询问 | 询问 | 询问 | 询问 | 询问 |
+| `edits` | 自动允许 | 只读命令自动，其余询问 | 询问 | 询问 | 询问 |
+| `auto`（默认） | 自动允许 | 自动允许 | 自动允许 | 询问 | 直接拒绝 |
+| `readonly` | 拒绝 | 拒绝 | 拒绝 | 拒绝 | 拒绝 |
+
+- 默认 `TOOL_PERMISSION_MODE=auto`，像 Claude Code 一样在项目内连续执行，
+  不再为每次编辑或命令弹窗；
+- `auto` 仍会直接拒绝 `git push`、`rm -rf`、`git reset --hard`、
+  `Remove-Item -Recurse` 等明显破坏性命令；`.git`、`data/`、`.env` 等受保护
+  路径仍由工具层硬性拦截；
+- 只有真正需要询问时才进入一次性授权流程：
 
 ```
 SSE:  {"type": "tool_permission_request", "token": "...", "session_id": "...",
@@ -405,10 +425,11 @@ POST: /api/tool-permission
 
 - token 与会话绑定、一次性使用；允许/拒绝/超时/取消后立即失效；
 - Web 端在输入框上方显示卡片，包含目标路径或完整命令；
-- CLI 端在终端打印同样信息并等待 `y/N`，`--yes` 可跳过；
+- CLI 端可用 `--permission-mode ask|edits|auto|readonly` 临时切换；
+  `--yes` 完全跳过策略（高风险）；
 - 拒绝会变成工具错误 Observation，模型必须换方案或向用户说明，不能假装成功；
 - 等待时长由 `TOOL_PERMISSION_TIMEOUT`（默认 120 秒）控制；
-- `REQUIRE_TOOL_APPROVAL=false` 可关闭该确认（仅建议在受控脚本中使用）。
+- `REQUIRE_TOOL_APPROVAL=false` 会连同策略一起关闭（仅建议在受控脚本中使用）。
 
 ### 自进化的推荐闭环
 
@@ -608,6 +629,7 @@ react_agent/
 ├── vector_memory.py    # SQLite 向量索引：特征哈希、混合检索、相关性重排
 ├── storage.py          # 共享路径锁 + JSON 原子写入
 ├── tool_context.py     # 工具运行上下文（会话、记忆范围、GPS/工具授权回调）
+├── permissions.py      # 分级授权策略：ask/edits/auto/readonly
 ├── llm.py              # DeepSeek Chat Completions 客户端（含重试）
 ├── prompts.py          # ReAct 系统提示词（含记忆与工具安全规则）
 ├── tools.py            # 15 个注册工具 + 内部工具实现与注册表
@@ -647,7 +669,7 @@ react_agent/
 
 ## 7. 测试
 
-离线测试（共 153 个用例，不需要 Key、不需要网络；符号链接用例在无权限的
+离线测试（共 158 个用例，不需要 Key、不需要网络；符号链接用例在无权限的
 Windows 环境会自动跳过）：
 
 ```bash
@@ -741,12 +763,15 @@ python agent.py --check-tools
   它已不在 Agent 的动作空间中。
 - `fetch_url` 只允许 http/https；手动跟随重定向并逐跳校验公网地址，
   阻止回环/内网/链路本地/保留地址，响应体限制 2 MB。
-- 默认允许访问本机任意文件路径；写文件、批量补丁、运行测试、Git 写操作和
-  执行命令前必须由用户允许一次。`.git`、`data/`、`.env` 默认禁止通过通用
-  文件工具写入、移动或删除。`REQUIRE_TOOL_APPROVAL=false` 会关闭确认，
-  只应在隔离或受控环境中使用。
-- `run_command` 直接执行本机命令，超时上限 600 秒；它不是安全沙箱，模型仍可能
-  执行破坏性操作，因此提示词禁止高危命令，且每次调用都需要用户确认。
+- 默认允许访问本机任意文件路径；`TOOL_PERMISSION_MODE=auto` 会在项目内自动
+  放行文件修改、测试和命令，项目外路径仍需确认，并直接拒绝 `git push`、
+  `rm -rf`、`reset --hard` 等明显破坏性命令。`.git`、`data/`、`.env` 默认
+  禁止通过通用文件工具写入、移动或删除。需要逐步确认时设 `ask` 或 `edits`。
+  `REQUIRE_TOOL_APPROVAL=false` 会连同授权策略一起关闭，只应在隔离或受控
+  环境中使用。
+- `run_command` 直接执行本机命令，超时上限 600 秒；它不是安全沙箱。`auto`
+  模式为了少打断会把项目内命令交给模型直接执行，提示词和危险命令黑名单只能
+  降低风险，不能替代容器/虚拟机隔离。
 - 自进化只能在干净工作区启动；`evolution.py` 会冻结 `tests/`、`config.py`、
   `.env`、`data/` 等裁判/密钥边界，拒绝二进制改动和超预算 diff，并在临时副本里
   重跑安全探针。`--yes` 仍自动拒绝 Agent 自行 commit/tag/checkout 以及

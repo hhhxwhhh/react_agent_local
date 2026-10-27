@@ -45,10 +45,15 @@ if FILE_ACCESS_MODE not in {"unrestricted", "workspace"}:
 # 相对路径的基准目录；默认项目根目录。
 FILE_ROOT = Path(os.getenv("FILE_ROOT", str(BASE_DIR))).expanduser().resolve()
 
-# 写文件、编辑文件、执行命令前是否请求用户确认。
+# 写文件、编辑文件、执行命令前是否启用授权策略。
 REQUIRE_TOOL_APPROVAL = os.getenv(
     "REQUIRE_TOOL_APPROVAL", "true"
 ).strip().lower() not in {"0", "false", "off", "no"}
+# 授权模式：ask 每步询问；edits 自动接受编辑和只读命令；auto 项目内自动放行；
+# readonly 拒绝所有写操作。auto 仍会拒绝明显破坏性的命令。
+TOOL_PERMISSION_MODE = os.getenv("TOOL_PERMISSION_MODE", "auto").strip().lower()
+if TOOL_PERMISSION_MODE not in {"ask", "edits", "auto", "readonly"}:
+    TOOL_PERMISSION_MODE = "auto"
 TOOL_PERMISSION_TIMEOUT = max(10, int(os.getenv("TOOL_PERMISSION_TIMEOUT", "120")))
 
 # 本机命令执行：默认超时与输出上限。
