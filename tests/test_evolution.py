@@ -111,6 +111,8 @@ class TestEvolutionHelpers(unittest.TestCase):
         self.assertIn("探索与收敛预算", question)
         self.assertIn("start_line/end_line", question)
         self.assertIn("不要修改、删除或新建 tests/", question)
+        self.assertIn("git diff --stat", question)
+        self.assertIn("改动文件：无", question)
 
         with_history = harness.build_generation_question(
             generation=4,
@@ -122,6 +124,234 @@ class TestEvolutionHelpers(unittest.TestCase):
         )
         self.assertIn("第 3 代 accepted", with_history)
         self.assertIn("不要原样重复", with_history)
+
+        with_experience = harness.build_generation_question(
+            generation=5,
+            objective="继续改进",
+            baseline_commit="abcdef123456",
+            max_diff_lines=120,
+            protected_paths=["tests/"],
+            experience="第 20 代｜agent_loop｜失败模式：claimed_without_edit",
+        )
+        self.assertIn("历史经验", with_experience)
+        self.assertIn("claimed_without_edit", with_experience)
+        self.assertIn("不得覆盖本代目标", with_experience)
+
+    def test_trace_metrics_summarizes_behavior(self):
+        trace = [
+            {
+                "step": 1,
+                "tool": "read_file",
+                "input": {"path": "a.py"},
+                "observation": "内容",
+            },
+            {
+                "step": 2,
+                "tool": "read_file",
+                "input": {"path": "a.py"},
+                "observation": "内容",
+                "duplicate": True,
+            },
+            {
+                "step": 3,
+                "tool": "read_file",
+                "input": {"path": "a.py", "start_line": 1},
+                "observation": "[已跳过重复读取] 已读",
+            },
+            {
+                "step": 4,
+                "tool": "write_file",
+                "input": {"path": "a.py"},
+                "observation": "写入成功",
+            },
+            {
+                "step": 5,
+                "tool": "run_command",
+                "input": {"command": "false"},
+                "observation": "ERROR: exit 1",
+            },
+            {"step": 6, "thought": "没有工具调用"},
+        ]
+        metrics = evolution._trace_metrics(trace)
+        self.assertEqual(metrics["actions"], 5)
+        self.assertEqual(metrics["read_calls"], 3)
+        self.assertEqual(metrics["write_calls"], 1)
+        self.assertEqual(metrics["duplicate_actions"], 1)
+        self.assertEqual(metrics["duplicate_reads"], 1)
+        self.assertEqual(metrics["skipped_reads"], 1)
+        self.assertEqual(metrics["tool_errors"], 1)
+        self.assertFalse(metrics["zero_tool"])
+        self.assertTrue(evolution._trace_metrics([])["zero_tool"])
+
+    def test_diagnose_claimed_without_edit(self):
+        record = {
+            "generation": 20,
+            "decision": "rejected",
+            "objective": "统一 agent.py 的读取阈值",
+            "reason": "Agent 没有产生任何改动",
+            "candidate": {"changed_files": []},
+            "agent": {
+                "final_answer": (
+                    "Final Answer:\n- 改动文件：`agent.py`\n- 核心改动：导入常量"
+                ),
+                "metrics": {
+                    "actions": 6,
+                    "read_calls": 5,
+                    "write_calls": 0,
+                    "duplicate_actions": 0,
+                    "skipped_reads": 0,
+                    "tool_errors": 0,
+                    "zero_tool": False,
+                },
+            },
+        }
+        diagnosis = evolution._diagnose_generation(record)
+        self.assertIn("no_change", diagnosis["failure_modes"])
+        self.assertIn("claimed_without_edit", diagnosis["failure_modes"])
+        self.assertEqual(diagnosis["component"], "agent_loop")
+
+    def test_experience_library_roundtrip_and_dedup(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "experience.jsonl"
+            accepted = {
+                "generation": 19,
+                "decision": "accepted",
+                "net_positive": True,
+                "objective": "补 session_id",
+                "component": "agent_loop",
+                "failure_modes": [],
+                "change_summary": "传入 session_id",
+            }
+            rejected = {
+                "generation": 20,
+                "decision": "rejected",
+                "net_positive": False,
+                "objective": "统一阈值",
+                "component": "agent_loop",
+                "failure_modes": ["claimed_without_edit"],
+                "change_summary": "",
+            }
+            with patch.object(evolution, "EXPERIENCE_FILE", path):
+                evolution._append_experience(accepted)
+                evolution._append_experience(accepted)
+                evolution._append_experience(rejected)
+                entries = evolution._read_experience()
+                summary = evolution._experience_summary()
+
+            self.assertEqual(len(entries), 2)
+            self.assertIn("已验证有效", summary)
+            self.assertIn("已否决", summary)
+            self.assertIn("claimed_without_edit", summary)
+            self.assertIn("传入 session_id", summary)
+
+    def test_auto_objective_scores_against_experience(self):
+        latest = {
+            "generation": 20,
+            "decision": "rejected",
+            "objective": "旧目标",
+            "reason": "Agent 没有产生任何改动",
+            "agent": {
+                "final_answer": (
+                    "Final Answer:\n- 对下一代 Harness 的建议：\n"
+                    "1. 在 README 补充说明\n"
+                    "2. 给 read_file 增加读取区间提示\n"
+                    "3. 重写整个 Agent\n"
+                )
+            },
+        }
+        entries = [
+            {"generation": 19, "decision": "accepted", "objective": "上一目标"},
+            latest,
+        ]
+        experience = [
+            {
+                "generation": index,
+                "net_positive": False,
+                "failure_modes": ["blind_read_loop"],
+                "component": "tools",
+            }
+            for index in range(1, 4)
+        ]
+        with patch.object(evolution, "_read_ledger", return_value=entries), patch.object(
+            evolution, "_read_experience", return_value=experience
+        ):
+            chosen, info = evolution._auto_objective()
+
+        self.assertEqual(chosen, "给 read_file 增加读取区间提示")
+        self.assertEqual(info["proposals"][0]["text"], chosen)
+        self.assertGreater(info["proposals"][0]["score"], 0)
+
+    def test_rebuild_experience_from_ledger(self):
+        entries = [
+            {
+                "generation": 1,
+                "decision": "accepted",
+                "objective": "补强工具错误处理",
+                "candidate": {"changed_files": ["tools.py"]},
+                "agent": {
+                    "final_answer": "- 核心改动：非零退出码返回 ERROR",
+                    "metrics": {
+                        "actions": 1,
+                        "read_calls": 0,
+                        "write_calls": 1,
+                        "duplicate_actions": 0,
+                        "duplicate_reads": 0,
+                        "skipped_reads": 0,
+                        "tool_errors": 0,
+                        "zero_tool": False,
+                    },
+                },
+            },
+            {"generation": 2, "decision": "error", "reason": "预检失败"},
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "experience.jsonl"
+            path.write_text("stale\n", encoding="utf-8")
+            with patch.object(evolution, "EXPERIENCE_FILE", path), patch.object(
+                evolution, "_read_ledger", return_value=entries
+            ):
+                self.assertEqual(evolution.rebuild_experience(), 0)
+
+            lines = path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(lines), 1)
+            item = json.loads(lines[0])
+            self.assertEqual(item["generation"], 1)
+            self.assertEqual(item["component"], "tools")
+            self.assertIn("完整测试通过", item["conditions"])
+
+    def test_auto_objective_falls_back_to_diagnosis(self):
+        latest = {
+            "generation": 21,
+            "decision": "rejected",
+            "objective": "旧目标",
+            "reason": "Agent 没有产生任何改动",
+            "candidate": {"changed_files": []},
+            "agent": {
+                "final_answer": "- 改动文件：`agent.py`\n- 核心改动：已修改",
+                "metrics": {
+                    "actions": 2,
+                    "read_calls": 0,
+                    "write_calls": 0,
+                    "duplicate_actions": 0,
+                    "duplicate_reads": 0,
+                    "skipped_reads": 0,
+                    "tool_errors": 0,
+                    "zero_tool": False,
+                },
+            },
+        }
+        entries = [
+            {"generation": 20, "decision": "accepted", "objective": "上一目标"},
+            latest,
+        ]
+        with patch.object(evolution, "_read_ledger", return_value=entries), patch.object(
+            evolution, "_read_experience", return_value=[]
+        ):
+            chosen, info = evolution._auto_objective()
+
+        self.assertEqual(info["proposal_source"], "diagnosis-fallback")
+        self.assertIn("Final Answer", chosen)
+        self.assertIn("git diff --stat", chosen)
 
     def test_generation_history_summary(self):
         entries = [

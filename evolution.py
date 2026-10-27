@@ -25,6 +25,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections import Counter
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -46,6 +47,7 @@ from tool_context import ToolContext
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data" / "evolution"
 LEDGER_FILE = DATA_DIR / "ledger.jsonl"
+EXPERIENCE_FILE = DATA_DIR / "experience.jsonl"
 REJECTED_DIR = DATA_DIR / "rejected"
 GENERATION_LOG_DIR = DATA_DIR / "logs"
 TAG_PREFIX = "evo-gen-"
@@ -857,6 +859,477 @@ def _bigram_overlap(a: str, b: str) -> float:
     return len(left & right) / len(left | right)
 
 
+# ---------------------------------------------------------------------------
+# 弱点诊断与经验沉淀
+# ---------------------------------------------------------------------------
+# 每代结束后把轨迹压成指标、归因到具体组件，再把“改了什么、是否有效、
+# 在什么条件下可复用”写入 experience.jsonl，供后续几代选目标和写提示时参考。
+
+_WRITE_TOOLS = {"write_file", "edit_file", "apply_patch"}
+_COMPONENT_FILES: dict[str, tuple[str, ...]] = {
+    "prompts": ("prompts.py",),
+    "agent_loop": ("agent.py",),
+    "tools": ("tools.py", "tool_context.py", "web_tools.py"),
+    "memory": ("memory.py",),
+    "sessions_web": ("sessions.py", "server.py", "web/"),
+    "harness": ("harness.py",),
+    "docs": ("docs/", "README.md"),
+}
+# 先看文本里最早出现的具体文件/符号，再看泛化关键词；否则一句“提示”会
+# 盖过真正的 agent.py / read_file，归因就偏了。
+_EXPLICIT_COMPONENT_HINTS: tuple[tuple[str, str], ...] = (
+    ("agent.py", "agent_loop"),
+    ("prompts.py", "prompts"),
+    ("tools.py", "tools"),
+    ("tool_context.py", "tools"),
+    ("memory.py", "memory"),
+    ("sessions.py", "sessions_web"),
+    ("server.py", "sessions_web"),
+    ("harness.py", "harness"),
+    ("read_file", "tools"),
+    ("write_file", "tools"),
+    ("edit_file", "tools"),
+    ("apply_patch", "tools"),
+    ("search_files", "tools"),
+    ("run_command", "tools"),
+    ("format_progress_block", "agent_loop"),
+    ("_compact_scratchpad", "agent_loop"),
+    ("_prepare_history", "agent_loop"),
+)
+_COMPONENT_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("prompts", ("提示词", "系统提示", "prompts.py", "提示层")),
+    ("tools", (
+        "工具层",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "apply_patch",
+        "search_files",
+        "run_command",
+    )),
+    ("memory", ("记忆", "memory.py", "长期记忆")),
+    ("sessions_web", ("会话", "server.py", "sessions.py", "前端", "web/")),
+    ("harness", ("harness", "评测", "回归测试", "测试套件")),
+    ("agent_loop", (
+        "agent.py",
+        "循环",
+        "压缩",
+        "进度",
+        "轮数",
+        "Observation",
+        "Final Answer",
+    )),
+)
+_FAILURE_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "no_change": ("无改动", "没有改动", "没有产生改动", "空 diff", "落盘"),
+    "claimed_without_edit": (
+        "声称",
+        "未落盘",
+        "没有落盘",
+        "git diff",
+        "真实改动",
+        "空 diff",
+    ),
+    "zero_tool_final": (
+        "零工具",
+        "没有调用工具",
+        "未调用工具",
+        "工具结果不可见",
+        "Observation 不可见",
+    ),
+    "blind_read_loop": ("read_file", "读取", "search_files", "行号", "盲读"),
+    "duplicate_actions": ("重复", "同一命令", "原样重复"),
+    "test_failure": ("测试失败", "回归测试"),
+    "test_reduction": ("测试数量", "减少测试"),
+    "eval_regression": ("评测", "行为对比", "评分下降"),
+    "frozen_boundary": ("冻结", "边界"),
+    "diff_budget": ("预算", "改动量"),
+    "compile_error": ("语法", "编译"),
+    "safety_regression": ("安全",),
+}
+
+
+def _read_experience() -> list[dict[str, Any]]:
+    if not EXPERIENCE_FILE.exists():
+        return []
+    entries: list[dict[str, Any]] = []
+    try:
+        for line in EXPERIENCE_FILE.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                value = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(value, dict):
+                entries.append(value)
+    except OSError:
+        return []
+    return entries
+
+
+def _append_experience(entry: dict[str, Any]) -> None:
+    """按代追加经验；同代重复写入时跳过，避免 finally 重入产生重复行。"""
+    if not entry:
+        return
+    generation = entry.get("generation")
+    if any(
+        str(item.get("generation")) == str(generation)
+        for item in _read_experience()
+    ):
+        return
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    line = _redact(json.dumps(entry, ensure_ascii=False, default=str))
+    with EXPERIENCE_FILE.open("a", encoding="utf-8", newline="\n") as handle:
+        handle.write(line + "\n")
+
+
+def _trace_metrics(trace: list[dict[str, Any]]) -> dict[str, Any]:
+    """把完整轨迹压缩成少量可聚类的行为指标。"""
+    actions: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    duplicates = 0
+    duplicate_reads = 0
+    for item in trace or []:
+        if not isinstance(item, dict) or not item.get("tool"):
+            continue
+        actions.append(item)
+        payload = item.get("input")
+        try:
+            signature = item.get("tool") + "|" + json.dumps(
+                payload, ensure_ascii=False, sort_keys=True, default=str
+            )
+        except (TypeError, ValueError):
+            signature = f"{item.get('tool')}|{payload}"
+        if signature in seen or item.get("duplicate"):
+            duplicates += 1
+            if item.get("tool") == "read_file":
+                duplicate_reads += 1
+        seen.add(signature)
+
+    read_calls = sum(1 for item in actions if item.get("tool") == "read_file")
+    write_calls = sum(1 for item in actions if item.get("tool") in _WRITE_TOOLS)
+    skipped_reads = sum(
+        1
+        for item in actions
+        if "[已跳过重复读取]" in str(item.get("observation") or "")
+    )
+    tool_errors = sum(
+        1
+        for item in actions
+        if str(item.get("observation") or "").lstrip().startswith("ERROR")
+    )
+    return {
+        "actions": len(actions),
+        "read_calls": read_calls,
+        "write_calls": write_calls,
+        "duplicate_actions": duplicates,
+        "duplicate_reads": duplicate_reads,
+        "skipped_reads": skipped_reads,
+        "tool_errors": tool_errors,
+        "zero_tool": not actions,
+    }
+
+
+def _component_from_files(paths: list[str]) -> str:
+    components: list[str] = []
+    for path in paths or []:
+        normalized = str(path).replace("\\", "/")
+        matched = "unknown"
+        for component, prefixes in _COMPONENT_FILES.items():
+            if any(
+                normalized == prefix.rstrip("/")
+                or normalized.startswith(prefix.rstrip("/") + "/")
+                for prefix in prefixes
+            ):
+                matched = component
+                break
+        if matched not in components:
+            components.append(matched)
+    return "+".join(components) if components else "unknown"
+
+
+def _component_from_text(text: str) -> str:
+    lowered = str(text or "").lower()
+    matches = [
+        (lowered.find(token), component)
+        for token, component in _EXPLICIT_COMPONENT_HINTS
+        if token in lowered
+    ]
+    if matches:
+        return min(matches, key=lambda item: item[0])[1]
+    for component, keywords in _COMPONENT_KEYWORDS:
+        if any(keyword.lower() in lowered for keyword in keywords):
+            return component
+    return "unknown"
+
+
+def _claims_edit(answer: str) -> bool:
+    """判断最终答案是否声称已经落盘，用于识别“只说不做”。"""
+    text = str(answer or "")
+    for match in re.finditer(
+        r"^\s*(?:[-*]|\d+[.)、])?\s*\**\s*改动文件\s*\**\s*[：:]\s*(.+)$",
+        text,
+        re.M,
+    ):
+        value = match.group(1).strip(" `*")
+        if value and not value.startswith(("无", "没有", "—", "-", "N/A", "n/a")):
+            return True
+    return bool(
+        re.search(
+            r"(?:已(?:编辑|应用|写入|修改|落盘)|补丁已(?:应用|落盘)|修改成功)",
+            text,
+        )
+    )
+
+
+def _final_section(answer: str, title: str) -> str:
+    match = re.search(
+        rf"^\s*(?:[-*]|\d+[.)、])?\s*\**\s*{re.escape(title)}\s*\**\s*[：:]\s*(.+)$",
+        str(answer or ""),
+        re.M,
+    )
+    return _one_line(match.group(1), 260) if match else ""
+
+
+def _diagnose_generation(record: dict[str, Any]) -> dict[str, Any]:
+    """把一代的结果归因到失败模式和具体组件。"""
+    decision = str(record.get("decision") or "")
+    reason = str(record.get("reason") or "")
+    objective = str(record.get("objective") or "")
+    agent = record.get("agent")
+    agent = agent if isinstance(agent, dict) else {}
+    candidate = record.get("candidate")
+    candidate = candidate if isinstance(candidate, dict) else {}
+    metrics = agent.get("metrics")
+    metrics = metrics if isinstance(metrics, dict) else {}
+    changed = [str(path) for path in candidate.get("changed_files") or []]
+    answer = str(agent.get("final_answer") or "")
+
+    modes: list[str] = []
+    if decision == "rejected":
+        if "没有产生任何改动" in reason:
+            modes.append("no_change")
+            if _claims_edit(answer) and not changed:
+                modes.append("claimed_without_edit")
+        if metrics and metrics.get("zero_tool"):
+            modes.append("zero_tool_final")
+        elif not metrics and any(
+            term in answer
+            for term in ("没有返回 Observation", "工具都没有返回", "Observation 不可见")
+        ):
+            modes.append("zero_tool_final")
+        if int(metrics.get("duplicate_actions") or 0) >= 2:
+            modes.append("duplicate_actions")
+        if int(metrics.get("skipped_reads") or 0) >= 1 or int(
+            metrics.get("duplicate_reads") or 0
+        ) >= 1:
+            modes.append("blind_read_loop")
+        elif int(metrics.get("read_calls") or 0) >= 8 and not metrics.get(
+            "write_calls"
+        ):
+            modes.append("blind_read_loop")
+        checks = (
+            ("冻结边界", "frozen_boundary"),
+            ("改动过大", "diff_budget"),
+            ("py_compile", "compile_error"),
+            ("安全检查", "safety_regression"),
+            ("候选测试未通过", "test_failure"),
+            ("测试数量", "test_reduction"),
+            ("评测", "eval_regression"),
+            ("当前分支", "branch_violation"),
+            ("自行创建了提交", "git_violation"),
+            (".env", "env_modified"),
+            ("Agent 运行失败", "agent_error"),
+            ("用户中断", "user_interrupt"),
+        )
+        for needle, mode in checks:
+            if needle in reason and mode not in modes:
+                modes.append(mode)
+    elif decision == "error":
+        modes.append("harness_error")
+
+    component = (
+        _component_from_files(changed)
+        if changed
+        else _component_from_text(objective + " " + reason + " " + answer)
+    )
+    return {
+        "decision": decision,
+        "failure_modes": list(dict.fromkeys(modes)),
+        "component": component,
+        "metrics": metrics,
+    }
+
+
+def _experience_entry(record: dict[str, Any]) -> dict[str, Any]:
+    """把一代结果整理成可复用/可规避的经验条目。"""
+    diagnosis = _diagnose_generation(record)
+    candidate = record.get("candidate")
+    candidate = candidate if isinstance(candidate, dict) else {}
+    agent = record.get("agent")
+    agent = agent if isinstance(agent, dict) else {}
+    answer = str(agent.get("final_answer") or "")
+    tests = candidate.get("tests")
+    tests = tests if isinstance(tests, dict) else {}
+    accepted = diagnosis["decision"] == "accepted"
+    change_summary = (
+        _final_section(answer, "核心改动")
+        or _final_section(answer, "改动文件")
+        or _final_section(answer, "结果")
+    )
+    modes = "、".join(diagnosis["failure_modes"]) or "无"
+    if accepted:
+        applicability = (
+            f"可复用于 {diagnosis['component']} 的同类改动；"
+            "前提是测试通过且评测不降级。"
+        )
+    else:
+        applicability = (
+            f"不要原样复用：在 {diagnosis['component']} 上尝试该目标未通过；"
+            f"失败模式为 {modes}。"
+        )
+    return {
+        "generation": record.get("generation"),
+        "decision": diagnosis["decision"],
+        "net_positive": accepted,
+        "objective": _one_line(str(record.get("objective") or ""), 300),
+        "component": diagnosis["component"],
+        "failure_modes": diagnosis["failure_modes"],
+        "change_summary": change_summary,
+        "changed_files": candidate.get("changed_files") or [],
+        "diff_lines": candidate.get("diff_lines"),
+        "tests_total": tests.get("total"),
+        "eval_score": candidate.get("eval_score"),
+        "commit": candidate.get("commit"),
+        "tag": candidate.get("tag"),
+        "reason": _one_line(str(record.get("reason") or ""), 200),
+        "metrics": diagnosis["metrics"],
+        "applicability": applicability,
+        "conditions": (
+            [
+                "完整测试通过",
+                "测试数量不减少",
+                "评测分数不降低",
+                "未触碰冻结边界",
+            ]
+            if accepted
+            else []
+        ),
+    }
+
+
+def _experience_summary(limit: int = 10) -> str:
+    """生成可注入下一代提示词的经验摘要；没有经验时返回空串。"""
+    entries = _read_experience()
+    if not entries:
+        return ""
+    recent = entries[-max(1, int(limit)) :]
+    accepted = [entry for entry in recent if entry.get("net_positive")][-4:]
+    rejected = [entry for entry in recent if not entry.get("net_positive")][-4:]
+    lines = [
+        "以下是 Harness 在以往代中验证过或否决过的经验，仅作参考，"
+        "不得覆盖本代目标、冻结边界和完成标准。"
+    ]
+    if accepted:
+        lines.append("已验证有效（可复用）：")
+        for entry in accepted:
+            change = _one_line(str(entry.get("change_summary") or ""), 120)
+            lines.append(
+                f"- 第 {entry.get('generation')} 代｜"
+                f"{entry.get('component') or 'unknown'}｜{change or '（无摘要）'}"
+            )
+    if rejected:
+        lines.append("已否决（不要原样重复）：")
+        for entry in rejected:
+            modes = "、".join(entry.get("failure_modes") or []) or "unknown"
+            objective = _one_line(str(entry.get("objective") or ""), 100)
+            lines.append(
+                f"- 第 {entry.get('generation')} 代｜"
+                f"{entry.get('component') or 'unknown'}｜{objective}｜"
+                f"失败模式：{modes}"
+            )
+    counts = Counter(
+        mode
+        for entry in entries
+        for mode in entry.get("failure_modes") or []
+        if mode
+    )
+    if counts:
+        top = "、".join(f"{mode}×{count}" for mode, count in counts.most_common(5))
+        lines.append(f"历史失败模式统计：{top}")
+    return "\n".join(lines)
+
+
+def _score_proposal(
+    text: str,
+    recent: list[str],
+    experience: list[dict[str, Any]],
+) -> tuple[float, list[str]]:
+    """给候选目标打分：优先针对高频失败模式、未验证组件和具体文件。"""
+    score = 0.0
+    reasons: list[str] = []
+    counts = Counter(
+        mode
+        for entry in experience
+        for mode in entry.get("failure_modes") or []
+        if mode
+    )
+    lowered = str(text or "").lower()
+    for mode, count in counts.most_common(4):
+        keywords = _FAILURE_KEYWORDS.get(mode, ())
+        if any(keyword.lower() in lowered for keyword in keywords):
+            score += 0.25 * min(count, 3)
+            reasons.append(f"命中历史失败模式 {mode}×{count}")
+    component = _component_from_text(text)
+    accepted_components = [
+        entry.get("component")
+        for entry in experience
+        if entry.get("net_positive")
+    ][-4:]
+    if component != "unknown" and component not in accepted_components:
+        score += 0.2
+        reasons.append(f"覆盖尚未验证的组件 {component}")
+    if re.search(r"`[^`]+`|[\w/]+\.py\b", str(text or "")):
+        score += 0.15
+        reasons.append("包含具体文件或符号")
+    if any(term in str(text or "") for term in ("再谈", "根因", "系统性", "综合评估")):
+        score -= 0.3
+        reasons.append("偏诊断而非可落地改动")
+    if recent:
+        novelty = 1.0 - max(_bigram_overlap(str(text or ""), old) for old in recent)
+        if novelty >= 0.8:
+            score += 0.1
+            reasons.append("与最近目标差异较大")
+    return round(score, 3), reasons
+
+
+# 只给“还没有硬护栏”的失败模式准备诊断提案，避免重复已经实现的能力
+# （例如 read_file 硬跳过、零工具调用退回、重复动作去重都已经存在）。
+_DIAGNOSTIC_PROPOSALS: dict[str, str] = {
+    "claimed_without_edit": (
+        "在 `agent.py` 的 Final Answer 处理中加入自进化落盘校验："
+        "若答案声称改动了文件，但 `git diff --stat` 为空，则退回该答案并要求"
+        "先真实落盘，不要直接结束。"
+    ),
+    "no_change": (
+        "在 `agent.py` 的探索循环中加入收敛护栏：连续只读达到阈值时，"
+        "要求先选定一个低风险文件完成最小改动，或明确说明本代无法安全完成。"
+    ),
+}
+
+
+def _diagnostic_proposals(record: dict[str, Any]) -> list[str]:
+    """从一代的失败诊断直接生成候选改动，作为复评为空时的兜底。"""
+    diagnosis = _diagnose_generation(record)
+    # 按 _DIAGNOSTIC_PROPOSALS 的声明顺序输出：更具体的“声称已改但未落盘”
+    # 排在泛化的“没有改动”之前，避免兜底提案只处理表层症状。
+    modes = set(diagnosis["failure_modes"])
+    return [
+        text for mode, text in _DIAGNOSTIC_PROPOSALS.items() if mode in modes
+    ]
+
+
 def _auto_objective() -> tuple[str, dict[str, Any]]:
     """用上一代自己的复盘建议生成下一代目标；没有可用建议时返回空串。"""
     entries = [
@@ -878,15 +1351,44 @@ def _auto_objective() -> tuple[str, dict[str, Any]]:
         feasible = [
             item for item in feasible if _bigram_overlap(item, previous) < 0.15
         ]
-    chosen = next(
-        (item for item in feasible if not any(_similar(item, old) for old in recent)),
-        "",
-    )
+    experience = _read_experience()
+    proposals = []
+    proposal_source = "retrospective"
+    for order, item in enumerate(feasible):
+        if any(_similar(item, old) for old in recent):
+            continue
+        score, reasons = _score_proposal(item, recent, experience)
+        proposals.append(
+            {
+                "text": item,
+                "score": score,
+                "reasons": reasons,
+                "order": order,
+            }
+        )
+    if not proposals:
+        proposal_source = "diagnosis-fallback"
+        for order, item in enumerate(_diagnostic_proposals(latest)):
+            if any(_similar(item, old) for old in recent):
+                continue
+            score, reasons = _score_proposal(item, recent, experience)
+            proposals.append(
+                {
+                    "text": item,
+                    "score": score,
+                    "reasons": reasons,
+                    "order": order,
+                }
+            )
+    proposals.sort(key=lambda item: (-item["score"], item["order"]))
+    chosen = proposals[0]["text"] if proposals else ""
     info = {
         "source": f"gen-{latest.get('generation', '?')}-retrospective",
         "generation": latest.get("generation"),
         "candidates": candidates,
         "feasible": feasible,
+        "proposal_source": proposal_source,
+        "proposals": proposals,
         "chosen": chosen,
     }
     return chosen, info
@@ -1329,6 +1831,12 @@ def run_single_generation(args: argparse.Namespace) -> int:
                 "[harness] 已注入历史迭代记录："
                 f"{sum(1 for line in history_text.splitlines() if line.startswith('- '))} 代"
             )
+        experience_text = _experience_summary()
+        if experience_text:
+            print(
+                "[harness] 已注入沉淀经验："
+                f"{sum(1 for line in experience_text.splitlines() if line.startswith('- '))} 条"
+            )
         question = harness.build_generation_question(
             generation=generation,
             objective=objective,
@@ -1337,6 +1845,7 @@ def run_single_generation(args: argparse.Namespace) -> int:
             protected_paths=sorted(PROTECTED_EXACT)
             + [prefix.rstrip("/") for prefix in PROTECTED_PREFIXES],
             history=history_text,
+            experience=experience_text,
         )
         permission_log: list[dict[str, Any]] = record["agent"]["permissions"]
         log_path = GENERATION_LOG_DIR / f"gen-{generation:03d}.log"
@@ -1384,6 +1893,7 @@ def run_single_generation(args: argparse.Namespace) -> int:
                 "final_answer": _redact(str(answer or ""))[:8000],
                 "usage": usage,
                 "llm_calls": llm_calls,
+                "metrics": _trace_metrics(trace),
             }
         )
 
@@ -1585,6 +2095,12 @@ def run_single_generation(args: argparse.Namespace) -> int:
             (GENERATION_LOG_DIR / f"gen-{generation:03d}.log").relative_to(ROOT)
         )
         try:
+            record["diagnosis"] = _diagnose_generation(record)
+            if record.get("decision") in {"accepted", "rejected"}:
+                record["experience"] = _experience_entry(record)
+        except (TypeError, ValueError) as exc:
+            record["diagnosis_error"] = f"{type(exc).__name__}: {exc}"
+        try:
             GENERATION_LOG_DIR.mkdir(parents=True, exist_ok=True)
             result_path = GENERATION_LOG_DIR / f"gen-{generation:03d}.result.json"
             result_path.write_text(
@@ -1598,6 +2114,11 @@ def run_single_generation(args: argparse.Namespace) -> int:
             _append_ledger(record)
         except OSError as exc:
             print(f"[harness] 无法写入 ledger：{exc}")
+        try:
+            if record.get("experience"):
+                _append_experience(record["experience"])
+        except OSError as exc:
+            print(f"[harness] 无法写入经验库：{exc}")
 
 
 def _supervisor(args: argparse.Namespace) -> int:
@@ -1673,7 +2194,64 @@ def show_status() -> int:
             )
         if entry.get("reason"):
             print(f"      原因：{_one_line(str(entry.get('reason')), 100)}")
+        diagnosis = entry.get("diagnosis")
+        if not isinstance(diagnosis, dict):
+            diagnosis = _diagnose_generation(entry)
+        if diagnosis.get("failure_modes"):
+            print(
+                f"      诊断：{diagnosis.get('component', 'unknown')}｜"
+                + "、".join(diagnosis["failure_modes"])
+            )
     print(f"\n记录文件：{LEDGER_FILE}")
+    print(f"经验库：{len(_read_experience())} 条（{EXPERIENCE_FILE}）")
+    return 0
+
+
+def _load_trace_steps(trace_file: Any) -> list[dict[str, Any]]:
+    if not isinstance(trace_file, str) or not trace_file:
+        return []
+    path = ROOT / trace_file
+    if not path.is_file():
+        return []
+    steps: list[dict[str, Any]] = []
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                item = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(item, dict) and item.get("type") == "step":
+                steps.append(item)
+    except OSError:
+        return []
+    return steps
+
+
+def rebuild_experience() -> int:
+    """从已有 ledger 与 trace 重建经验库，供本地数据丢失后恢复。"""
+    entries = [
+        entry
+        for entry in _read_ledger()
+        if entry.get("decision") in {"accepted", "rejected"}
+    ]
+    if not entries:
+        print("没有可回填的自进化记录。")
+        return 0
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    EXPERIENCE_FILE.write_text("", encoding="utf-8")
+    count = 0
+    for entry in entries:
+        agent = entry.get("agent")
+        if not isinstance(agent, dict):
+            agent = {}
+            entry["agent"] = agent
+        if not agent.get("metrics"):
+            steps = _load_trace_steps(agent.get("trace_file"))
+            if steps:
+                agent["metrics"] = _trace_metrics(steps)
+        _append_experience(_experience_entry(entry))
+        count += 1
+    print(f"已回填 {count} 条经验：{EXPERIENCE_FILE}")
     return 0
 
 
@@ -1728,6 +2306,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--no-color", action="store_true")
     parser.add_argument("--status", action="store_true", help="查看历史记录")
+    parser.add_argument(
+        "--backfill-experience",
+        action="store_true",
+        help="从已有 ledger 与 trace 重建 data/evolution/experience.jsonl",
+    )
     parser.add_argument("--once", action="store_true", help=argparse.SUPPRESS)
     return parser
 
@@ -1742,6 +2325,8 @@ def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     if args.status:
         return show_status()
+    if args.backfill_experience:
+        return rebuild_experience()
 
     args.generations = max(1, int(args.generations))
     args.max_steps = max(5, int(args.max_steps))
