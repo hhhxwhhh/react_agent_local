@@ -1914,6 +1914,13 @@ def read_file(
             f"文件：{_display_path(target)}"
             f"（{size} 字节，第 {first}-{last} 行 / 共 {total_lines} 行）\n\n"
         )
+        if end and end > total_lines:
+            header = (
+                f"文件：{_display_path(target)}"
+                f"（{size} 字节，第 {first}-{last} 行 / 共 {total_lines} 行）\n"
+                f"[注意：end_line={end} 超过文件总行数 {total_lines}，"
+                f"已截断到第 {last} 行]\n\n"
+            )
         if len(selected) > limit:
             return (
                 header
