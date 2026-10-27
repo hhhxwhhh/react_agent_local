@@ -55,7 +55,7 @@ from permissions import decide_permission, normalize_mode
 from tool_context import ToolContext
 
 REQUEST_TIMEOUT = 15
-MAX_OBSERVATION_CHARS = 3000
+MAX_OBSERVATION_CHARS = 12000
 
 HEADERS = {
     "User-Agent": (
@@ -2968,7 +2968,7 @@ TOOL_SPECS: dict[str, dict] = {
         },
     },
     "run_command": {
-        "description": "在本机 shell 中执行命令或代码，例如 python script.py、python -c \"...\"、node app.js、git status、dir。cwd 可为绝对路径；相对路径以项目根目录为基准。会先请求用户授权，超时后终止进程树。",
+        "description": "在本机 shell 中执行命令或代码，例如 python -X utf8 -c \"print(1+1)\"、python -X utf8 script.py、node app.js、git status、dir。需要实际运行/验证代码时优先用它；cwd 可为绝对路径，相对路径以项目根目录为基准。会按授权模式自动放行或请求确认，超时后终止进程树。",
         "parameters": {
             "type": "object",
             "properties": {

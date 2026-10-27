@@ -147,7 +147,7 @@ TOOL_FUNCS["get_weather"] = get_weather
 3. 按 schema 做 `integer` / `number` / `string` / `boolean` 类型转换；
 4. 需要上下文的工具注入 `ToolContext`；
 5. 执行函数，捕获所有异常，统一转成 `ERROR: 工具 ... 执行失败：...`；
-6. 结果截断到约 3000 字符。
+6. 结果截断到约 12000 字符。
 
 工具函数的约定是：**只返回字符串，失败就抛异常，不打印、不控制循环**。这样任何工具错误都会变成一条模型能读懂的 Observation。
 
@@ -186,7 +186,7 @@ TOOL_FUNCS["get_weather"] = get_weather
 
 - **重复调用拦截**：完全相同的 `(工具名, 参数)` 只执行一次。
 - **格式错误收口**：连续格式错误达到上限后提前结束，不再无限重试。
-- **最大步数**：默认 8 步，超限时追加强制收口提示。
+- **最大步数**：默认 24 步，超限时追加强制收口提示。
 - **取消检查**：每次模型调用和工具调用前后检查取消信号。
 
 这些约束不是“额外功能”，而是 ReAct 能稳定运行的前提。
@@ -203,10 +203,10 @@ TOOL_FUNCS["get_weather"] = get_weather
 | Python | 3.12.3 |
 | 模型 | DeepSeek `deepseek-chat` |
 | 温度 | 0.2 |
-| 单次输出上限 | 2048 tokens |
+| 单次输出上限 | 8192 tokens |
 | 天气 / 空气质量 | Open-Meteo 公开 API |
-| 工具数量 | 21 |
-| 离线测试 | 158 个用例 |
+| 工具数量 | 15 |
+| 离线测试 | 159 个用例 |
 
 #### 4.2 工具自检
 
@@ -331,15 +331,15 @@ python -m unittest discover -s tests -v
 结果：
 
 ```text
-Ran 158 tests in 7.984s
+Ran 159 tests in 9.235s
 OK (skipped=1)
 ```
 
-158 个用例中 157 个通过，1 个符号链接用例因 Windows 权限跳过。覆盖 ReAct 解析与循环、工具安全、文件访问与命令执行、Git 与测试运行、自进化裁判与安全沙箱、SSRF 拦截、记忆并发与 TTL、上下文压缩、会话隔离、SSE、位置授权、工具授权、地理查询等。
+159 个用例中 158 个通过，1 个符号链接用例因 Windows 权限跳过。覆盖 ReAct 解析与循环、工具安全、文件访问与命令执行、Git 与测试运行、自进化裁判与安全沙箱、SSRF 拦截、记忆并发与 TTL、上下文压缩、会话隔离、SSE、位置授权、工具授权、地理查询等。
 
 ![图2 离线测试分布](figures/fig2_test_coverage.png)
 
-*图2：158 个离线用例的分布。*
+*图2：159 个离线用例的分布。*
 
 ---
 
@@ -359,7 +359,7 @@ OK (skipped=1)
 | 模型不按格式输出 | 没有 Action，或参数不是 JSON | 解析器容错 + 格式纠错 Observation + 连续错误收口 |
 | 模型编造 Observation | 自己写“Observation: 晴” | `stop` 序列强制在 Action 后停下 |
 | 重复调用 | 反复调用同一个工具 | `(工具名, 参数)` 去重 |
-| 无限循环 | 一直不给出 Final Answer | `MAX_STEPS=8`，超限强制收口 |
+| 无限循环 | 一直不给出 Final Answer | `MAX_STEPS=24`，超限强制收口 |
 | 工具异常 | 网络错误、参数错误 | `run_tool` 捕获异常，转成 ERROR Observation |
 | 高危本机操作 | 误写文件、执行破坏性命令 | `auto` 项目内自动放行、项目外确认并拒绝明显危险命令；`ask`/`edits` 可收紧；命令超时终止进程树 |
 | 工具选错 | 该查天气却查汇率 | 工具描述 + schema；仍需在评测中继续优化 |
@@ -450,7 +450,7 @@ python -m unittest discover -s tests -v
 | `vector_memory.py` | 本地特征哈希向量索引 |
 | `storage.py` | 共享路径锁 + JSON 原子写入 |
 | `sessions.py` | 会话持久化 |
-| `tests/` | 158 个离线测试 |
+| `tests/` | 159 个离线测试 |
 
 ### 附录 B：完整天气任务轨迹
 

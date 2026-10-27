@@ -27,7 +27,10 @@ from config import (
     DEEPSEEK_MODEL,
     HISTORY_COMPACT_CHARS,
     HISTORY_COMPACT_MESSAGES,
+    HISTORY_INJECT_CHARS,
+    HISTORY_INJECT_MESSAGES,
     HISTORY_KEEP_MESSAGES,
+    HISTORY_MESSAGE_MAX_CHARS,
     HISTORY_SUMMARY_BATCH_MESSAGES,
     MAX_STEPS,
     REQUIRE_TOOL_APPROVAL,
@@ -364,6 +367,8 @@ class ReActAgent:
         history_compact_messages: int | None = None,
         history_keep_messages: int | None = None,
         history_summary_batch_messages: int | None = None,
+        history_inject_messages: int | None = None,
+        history_inject_chars: int | None = None,
         progress_nudge_steps: int = 0,
     ) -> None:
         self.llm = llm
@@ -414,10 +419,16 @@ class ReActAgent:
         self.history_summary_batch_messages = max(
             1, int(history_summary_batch_messages or HISTORY_SUMMARY_BATCH_MESSAGES)
         )
+        self.history_inject_messages = max(
+            2, int(history_inject_messages or HISTORY_INJECT_MESSAGES)
+        )
+        self.history_inject_chars = max(
+            500, int(history_inject_chars or HISTORY_INJECT_CHARS)
+        )
         # 连续只读探索多少步后提醒模型开始写操作；0 表示关闭（默认）。
         self.progress_nudge_steps = max(0, int(progress_nudge_steps or 0))
         self.history_summary_input_chars = max(
-            4000, min(16000, self.history_compact_chars * 2)
+            4000, min(48000, self.history_compact_chars * 2)
         )
 
         self.last_trace: list[dict] = []
@@ -571,7 +582,7 @@ class ReActAgent:
             return scratchpad
 
         head_for_summary = _truncate_middle(
-            head, min(16000, max(4000, self.context_compact_chars * 3))
+            head, min(48000, max(4000, self.context_compact_chars * 3))
         )
         prompt = (
             "## 当前任务\n"
@@ -663,7 +674,7 @@ class ReActAgent:
             chunk_text = format_history(
                 chunk,
                 max_messages=max(1, len(chunk)),
-                max_chars=2000,
+                max_chars=HISTORY_MESSAGE_MAX_CHARS,
                 total_chars=self.history_summary_input_chars,
             ).strip()
             if chunk_text:
@@ -718,13 +729,21 @@ class ReActAgent:
 
         if summary:
             recent_text = format_history(
-                messages[count:], max_messages=max(12, len(messages) - count)
+                messages[count:],
+                max_messages=max(self.history_inject_messages, len(messages) - count),
+                max_chars=HISTORY_MESSAGE_MAX_CHARS,
+                total_chars=self.history_inject_chars,
             )
             history_text = "更早对话摘要（系统压缩，不是原文）：\n" + summary
             if recent_text:
                 history_text += "\n\n最近对话：\n" + recent_text
         else:
-            history_text = format_history(messages)
+            history_text = format_history(
+                messages,
+                max_messages=self.history_inject_messages,
+                max_chars=HISTORY_MESSAGE_MAX_CHARS,
+                total_chars=self.history_inject_chars,
+            )
 
         self.last_history_summary = summary if summary else ""
         self.last_history_summary_count = count if summary else 0

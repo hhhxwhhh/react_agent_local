@@ -398,6 +398,22 @@ class TestFileTools(unittest.TestCase):
         self.assertIn("permission-ok", result)
         self.assertIn("退出码：0", result)
 
+    def test_run_command_executes_python_code_without_prompt(self):
+        self.directory.mkdir(parents=True, exist_ok=True)
+        prompts: list[dict] = []
+        context = ToolContext(
+            permission_mode="auto",
+            request_tool_permission=lambda payload: prompts.append(payload) or False,
+        )
+        result = run_command(
+            'python -X utf8 -c "print(6 * 7)"',
+            cwd=str(self.directory),
+            context=context,
+        )
+        self.assertIn("42", result)
+        self.assertIn("退出码：0", result)
+        self.assertEqual(prompts, [])
+
     def test_auto_permission_mode_approves_project_edits_without_prompt(self):
         prompts: list[dict] = []
         context = ToolContext(

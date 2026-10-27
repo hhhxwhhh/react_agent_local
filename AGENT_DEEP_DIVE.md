@@ -436,7 +436,7 @@ Action 4: Finish[keyboard function keys]
 | 记忆 | 无跨 episode 记忆 | 会话记忆 + 全局记忆 | 引入论文没有的跨会话状态与污染问题 | 记忆命中、泄漏、 stale memory 实验 |
 | 学习 | 主实验不训练；附录做 3,000 条轨迹微调 | 完全冻结 API | 不能声称“训练了 Agent” | 用成功轨迹做 SFT / Reflexion 式反思 |
 | 人类干预 | Thought editing，可改推理后继续 | 只展示 trace，不可编辑 | 可解释性只是“可看”，不是“可干预” | 增加 trace 编辑与分支重放 |
-| 评测 | EM / Acc / SR + 人工失败分类 | 158 个单元测试 + 真实用例 | 工程正确性 ≠ 任务能力 | 建立任务集、baseline、统计检验 |
+| 评测 | EM / Acc / SR + 人工失败分类 | 159 个单元测试 + 真实用例 | 工程正确性 ≠ 任务能力 | 建立任务集、baseline、统计检验 |
 | 安全 | 限制网站和动作，规避风险 | 逐跳 SSRF 校验/文件与命令分级授权/外部内容边界，但开放网页与本机执行 | 攻击面更大，仍非生产级隔离 | 注入、SSRF、越权文件访问、高危命令红队测试 |
 
 一句话总结这张表：
@@ -800,7 +800,7 @@ Final Answer: 北京现在天气为阴，气温 9.9°C...
 | 重复调用 | 同一工具同一参数多次 | 完全相同调用只执行一次；连续重复提前收口 | 跟踪重复率与重复后的恢复率 |
 | 只读不落地 | 反复查看文件/状态，从不修改 | 连续只读达到阈值后注入系统提示，要求立即写文件或收口 | 用剩余预算动态决定探索/利用比例 |
 | 不输出 Final | 一直调用工具 | `max_steps` 后强制收口 | 学出来的停止策略 |
-| 观测过长 | 上下文膨胀 | 单条观测截断到 3000 字符；scratchpad/历史超阈值后摘要 | 摘要保真度评测、分段读取、按需回查原文 |
+| 观测过长 | 上下文膨胀 | 单条观测截断到 12000 字符；scratchpad/历史超阈值后摘要 | 摘要保真度评测、分段读取、按需回查原文 |
 | 观测注入 | 网页内容含恶意指令 | 提示词警告 + 外部资料边界标记 | 结构化隔离、内容过滤、来源策略 |
 
 ### 3.7 与论文 prompt 的差异：zero-shot schema vs few-shot trajectory
@@ -819,7 +819,7 @@ Final Answer: 北京现在天气为阴，气温 9.9°C...
 
 这带来两个直接后果：
 
-1. **格式错误率不可比**。论文的格式更接近自然语言，模型容易模仿；我们的 JSON + 21 工具更难，格式错误主要由解析器兜底。
+1. **格式错误率不可比**。论文的格式更接近自然语言，模型容易模仿；我们的 JSON + 15 工具更难，格式错误主要由解析器兜底。
 2. **“ReAct 有效”不能直接外推**。论文的 few-shot 轨迹同时提供了“怎么想”和“怎么调用”的示范；我们的 zero-shot 设置只提供“允许怎么调用”，模型需要自己发明推理策略。
 
 如果要做论文对齐实验，最小改动是：
@@ -894,7 +894,7 @@ TOOL_FUNCS[name] = callable
 3. 按 schema 做类型转换；
 4. 注入 `ToolContext`（当前会话、默认记忆范围）；
 5. 捕获所有异常，转成 `ERROR: ...` 文本；
-6. 把过长的 Observation 截断到 3000 字符。
+6. 把过长的 Observation 截断到 12000 字符。
 
 ### 4.2 15 个工具
 
@@ -1238,8 +1238,8 @@ v3 把压缩拆成两层：
 
 | 层级 | 触发条件 | 保留策略 | 失败回退 |
 |---|---|---|---|
-| 单轮 scratchpad | 长度 > `CONTEXT_COMPACT_CHARS`（默认 7000） | 最近 `CONTEXT_KEEP_CHARS`（默认 2400）字符原文 + 较早步骤摘要 | 抽取式压缩：保留 Thought/Action/Observation/URL/ERROR 行 |
-| 跨轮会话历史 | 消息数 > `HISTORY_COMPACT_MESSAGES`（默认 12）或字符数 > `HISTORY_COMPACT_CHARS`（默认 9000） | 最近 `HISTORY_KEEP_MESSAGES`（默认 8）条原文 + 增量摘要 | 同上 |
+| 单轮 scratchpad | 长度 > `CONTEXT_COMPACT_CHARS`（默认 32000） | 最近 `CONTEXT_KEEP_CHARS`（默认 12000）字符原文 + 较早步骤摘要 | 抽取式压缩：保留 Thought/Action/Observation/URL/ERROR 行 |
+| 跨轮会话历史 | 消息数 > `HISTORY_COMPACT_MESSAGES`（默认 32）或字符数 > `HISTORY_COMPACT_CHARS`（默认 32000） | 最近 `HISTORY_KEEP_MESSAGES`（默认 16）条原文 + 增量摘要 | 同上 |
 
 关键设计：
 
@@ -1553,7 +1553,7 @@ Agent：你平时喜欢喝龙井茶。
 python -m unittest discover -s tests -v
 ```
 
-当前 **158 个测试**（1 个符号链接用例在无权限的 Windows 环境跳过），覆盖：
+当前 **159 个测试**（1 个符号链接用例在无权限的 Windows 环境跳过），覆盖：
 
 - ReAct 解析：Final/Action/全角冒号/代码围栏/裸参数/Thought 内出现 `Final Answer:`；
 - ReAct 循环：Action→Final、格式错误修正、重复动作拦截、连续格式错误收口、取消检查、强制收口；
@@ -1674,7 +1674,7 @@ python -m unittest discover -s tests -v
 
 ### 7.5 论文对齐实验的最小清单
 
-如果组会追问“你和 ReAct 论文的数字怎么比”，不要拿 158 个单元测试去对 Table 1。正确做法是先声明**不可比**，再给出一个可执行的缩小版复现。
+如果组会追问“你和 ReAct 论文的数字怎么比”，不要拿 159 个单元测试去对 Table 1。正确做法是先声明**不可比**，再给出一个可执行的缩小版复现。
 
 **第一步：限制动作空间**
 
@@ -1739,7 +1739,7 @@ python -m unittest discover -s tests -v
 | P2 | [agent.py](agent.py) 停止只能在检查点生效 | 正在进行的 LLM HTTP 请求无法中断 | 流式响应 + 读取时取消，或拆分请求 |
 | P2 | [prompts.py](prompts.py) 每步强制 Thought | 简单单工具调用也产生思考 token；论文允许决策任务稀疏思考 | 支持 Thought 密度策略并做对照 |
 | P2 | [tools.py](tools.py) “实时汇率”不准确 | open.er-api 每日更新，实测更新于 00:02 UTC | 改称“参考汇率” |
-| P2 | [tools.py](tools.py) Observation 上限不一致 | `fetch_url` 允许 8000，实际被截到 3000 | 统一预算或分段读取 |
+| 已修复 | [tools.py](tools.py) Observation 上限不一致 | `fetch_url` 允许 8000，原先被截到 3000 | 观测上限统一为 12000，`fetch_url` 的结果不再被二次截断 |
 | P1 | [vector_memory.py](vector_memory.py) 特征哈希不是语义 embedding | 同义改写（“龙井” vs “绿茶”）召回明显下降；中文无分词 | 可插拔神经 embedding；先做同义改写鲁棒性评测，把负面结果如实报告 |
 | P2 | [vector_memory.py](vector_memory.py) 检索是 O(N·d) 暴力扫描 | 每范围 200 条、512 维时毫秒级；规模上去会线性变慢 | 分层/归档优先，其次 SQLite 向量扩展或 ANN，最后才上独立向量库 |
 | P3 | [vector_memory.py](vector_memory.py) 索引懒同步 | `remember` 后不立即写向量，首次检索才 sync；旧行可能短暂残留 | 命中回查实时记忆已保证正确性；可在记忆面板加“重建索引” |
@@ -1886,7 +1886,7 @@ python -m unittest discover -s tests -v
 
 **3:00–4:00 证据**
 
-> 论文的数字不是“ReAct 全面碾压”：HotpotQA 上 ReAct 27.4 低于 CoT 29.4，FEVER 上 60.9 高于 56.3；ALFWorld 最好 71% 对 BUTLER 37%；WebShop 40% 对 IL+RL 28.7%。真正稳定的是“ReAct + CoT-SC 组合最好”，以及 grounding 带来的可解释性。我的项目做了 158 个离线测试、15 个工具联网检查和真实模型端到端测试。会话记忆能隔离，同会话并发返回 409，跨会话并发有全局上限，停止能在下一个检查点取消，API Key 失效时不会挂起。我也压测出了几个边界问题并修掉了：并发写全局记忆丢数据、AQI 标签混用、重复动作、SSRF 重定向绕过和 token 统计不完整。
+> 论文的数字不是“ReAct 全面碾压”：HotpotQA 上 ReAct 27.4 低于 CoT 29.4，FEVER 上 60.9 高于 56.3；ALFWorld 最好 71% 对 BUTLER 37%；WebShop 40% 对 IL+RL 28.7%。真正稳定的是“ReAct + CoT-SC 组合最好”，以及 grounding 带来的可解释性。我的项目做了 159 个离线测试、15 个工具联网检查和真实模型端到端测试。会话记忆能隔离，同会话并发返回 409，跨会话并发有全局上限，停止能在下一个检查点取消，API Key 失效时不会挂起。我也压测出了几个边界问题并修掉了：并发写全局记忆丢数据、AQI 标签混用、重复动作、SSRF 重定向绕过和 token 统计不完整。
 
 **4:00–4:40 局限**
 
@@ -1908,7 +1908,7 @@ python -m unittest discover -s tests -v
 | 6 | ReAct 循环与解析 | 格式错了怎么办？ |
 | 7 | 工具与安全 + 观测信任边界 | SSRF/注入怎么防？ |
 | 8 | 记忆分层 | 会话/全局边界？和 RAG 区别？ |
-| 9 | 我的评测与论文对照 | 158 个测试够吗？baseline？ |
+| 9 | 我的评测与论文对照 | 159 个测试够吗？baseline？ |
 | 10 | 局限与下一步 | 创新点是什么？ |
 
 ### 10.3 白板画法
@@ -1958,17 +1958,17 @@ Stop = Final Answer or max_steps
 
 | 数字 | 含义 |
 |---|---|
-| 18 | 工具数量 |
-| 8 | 默认最大 ReAct 步数 |
+| 15 | 工具数量 |
+| 24 | 默认最大 ReAct 步数 |
 | 3 | LLM 请求最多尝试次数 |
-| 2048 | 单次生成 `max_tokens`（`DEEPSEEK_MAX_TOKENS`） |
+| 8192 | 单次生成 `max_tokens`（`DEEPSEEK_MAX_TOKENS`） |
 | 90s | LLM 请求超时 |
 | 1800 | 记忆注入字符上限 |
-| 3000 | 单条 Observation 字符上限 |
+| 12000 | 单条 Observation 字符上限 |
 | 2 MB | `fetch_url` 响应体读取上限 |
 | 4 | `fetch_url` 最大重定向跳数 |
-| 12 / 5000 | 历史最多消息数 / 总字符 |
-| 158 | 当前测试数（1 个符号链接用例在无权限 Windows 跳过） |
+| 32 / 32000 | 历史注入消息数 / 总字符 |
+| 159 | 当前测试数（1 个符号链接用例在无权限 Windows 跳过） |
 | 512 | 本地向量维度（`VECTOR_DIM`） |
 | 0.7 | 混合检索中余弦权重（`VECTOR_HYBRID_ALPHA`） |
 | 200 | 每个记忆范围的最大条数，也是暴力检索的规模上界 |
@@ -2085,11 +2085,11 @@ Stop = Final Answer or max_steps
 
 > 不宣称完备。v1 实测发现 100.64.0.0/10 和组播地址会被放行，而且 `requests.allow_redirects=True` 是请求发出后才检查最终 URL。v2 已改为 `is_global` + 手动逐跳校验 + 响应体上限。仍有一个理论窗口：校验时的 DNS 解析和 `requests` 实际连接时的解析不是同一次，存在 DNS rebinding 风险；要彻底解决需要 IP 钉扎或受控代理，我把它列为后续工作。
 
-#### Q10. 你怎么证明这个 Agent 有效？158 个测试够吗？
+#### Q10. 你怎么证明这个 Agent 有效？159 个测试够吗？
 
 **30 秒回答：**
 
-> 158 个测试证明的是**工程正确性**：解析、循环、工具、记忆索引、会话、API 在受控输入下按预期工作。它不证明开放任务上的效果。论文用的是 EM / Acc / SR 加人工失败分类；我要证明效果，也需要任务集、baseline、指标和消融：Direct、CoT、Act-only、ReAct、ReAct+memory，记忆层再分“精确 key / 关键词 / 向量 / 混合”，比较成功率、步数、时延、token、重复动作率、检索 recall@k 和错误恢复率，而不是拿单元测试去对论文表格。
+> 159 个测试证明的是**工程正确性**：解析、循环、工具、记忆索引、会话、API 在受控输入下按预期工作。它不证明开放任务上的效果。论文用的是 EM / Acc / SR 加人工失败分类；我要证明效果，也需要任务集、baseline、指标和消融：Direct、CoT、Act-only、ReAct、ReAct+memory，记忆层再分“精确 key / 关键词 / 向量 / 混合”，比较成功率、步数、时延、token、重复动作率、检索 recall@k 和错误恢复率，而不是拿单元测试去对论文表格。
 
 **追问：那你现在有量化结果吗？**
 
@@ -2120,11 +2120,11 @@ Stop = Final Answer or max_steps
 | 问题 | 回答 |
 |---|---|
 | temperature 为什么是 0.2？ | 降低随机性，让 ReAct 格式更稳定；代价是多样性下降。 |
-| `max_tokens=2048` 够吗？ | 对单步 ReAct 通常够；长答案可能被截断。返回 `finish_reason=length` 时 trace 会提示，可在 `.env` 调大 `DEEPSEEK_MAX_TOKENS`。 |
+| `max_tokens=8192` 够吗？ | 对单步 ReAct 通常够；长答案可能被截断。返回 `finish_reason=length` 时 trace 会提示，可在 `.env` 调大 `DEEPSEEK_MAX_TOKENS`。 |
 | 为什么 `max_steps=8`？ | 经验预算；太小完不成多工具任务，太大增加成本和错误传播。 |
 | 为什么每轮只调一个工具？ | 简化观测、错误隔离和 trace；并行工具是后续优化。 |
 | 工具报错会中断吗？ | 不会，错误变成 Observation，模型可以修正或换工具。 |
-| 为什么 Observation 截到 3000 字？ | 控制上下文和 token；代价是长网页信息丢失。 |
+| 为什么 Observation 截到 12000 字？ | 控制上下文和 token；代价是长网页信息丢失。 |
 | 为什么用 JSON 文件存会话？ | 简单、可读、易调试；规模大时应换数据库。 |
 | 会话 ID 为什么是 32 位 hex？ | UUID4 无连字符，难猜且便于路径校验。 |
 | 写入为什么用临时文件 + replace？ | 唯一临时文件 + `fsync` + `os.replace`，避免写一半留下损坏 JSON，也避免并发写共用 `.tmp` 互相覆盖。 |
@@ -2193,7 +2193,7 @@ Stop = Final Answer or max_steps
 
 **追问：那你的项目有数字吗？**
 
-> 目前只有工程测试和真实用例，没有论文级的 benchmark。我不会拿 158 个单元测试去对 Table 1；下一步会做 3 组 × 60 题的配对实验。
+> 目前只有工程测试和真实用例，没有论文级的 benchmark。我不会拿 159 个单元测试去对 Table 1；下一步会做 3 组 × 60 题的配对实验。
 
 #### Q3. “论文用 few-shot，你是 zero-shot，这还算 ReAct 吗？”
 
@@ -2380,8 +2380,8 @@ python -m unittest discover -s tests -v
 | `DEEPSEEK_API_KEY` | 空 | DeepSeek Key |
 | `DEEPSEEK_BASE_URL` | `https://api.deepseek.com` | API 地址 |
 | `DEEPSEEK_MODEL` | `deepseek-chat` | 模型 |
-| `MAX_STEPS` | `8` | 最大 ReAct 轮数 |
-| `DEEPSEEK_MAX_TOKENS` | `2048` | 单次生成上限 |
+| `MAX_STEPS` | `24` | 最大 ReAct 轮数 |
+| `DEEPSEEK_MAX_TOKENS` | `8192` | 单次生成上限 |
 | `MAX_CONCURRENT_RUNS` | `3` | 跨会话同时运行上限 |
 | `REQUEST_TIMEOUT` | `90` | LLM 请求超时 |
 | `VECTOR_MEMORY_ENABLED` | `true` | 向量记忆总开关，可做消融 |
@@ -2390,6 +2390,11 @@ python -m unittest discover -s tests -v
 | `VECTOR_MIN_SCORE` | `0.05` | 混合分数阈值 |
 | `VECTOR_HYBRID_ALPHA` | `0.7` | 余弦相似度权重 |
 | `SEMANTIC_RERANK_MIN_ENTRIES` | `6` | 触发注入前重排的最小记忆数 |
+| `CONTEXT_COMPACT_CHARS` | `32000` | 单轮 scratchpad 压缩阈值 |
+| `CONTEXT_KEEP_CHARS` | `12000` | 单轮压缩后保留的最近原文 |
+| `HISTORY_COMPACT_MESSAGES` / `HISTORY_COMPACT_CHARS` | `32 / 32000` | 跨轮历史压缩阈值 |
+| `HISTORY_INJECT_MESSAGES` / `HISTORY_INJECT_CHARS` | `32 / 32000` | 每轮注入提示词的历史窗口 |
+| `COMMAND_MAX_OUTPUT_CHARS` | `20000` | 命令合并输出上限 |
 
 ### A.3 关键代码位置
 

@@ -66,18 +66,21 @@ copy .env.example .env
 ```ini
 DEEPSEEK_API_KEY=sk-你的真实Key
 DEEPSEEK_MODEL=deepseek-chat
-MAX_STEPS=8
-DEEPSEEK_MAX_TOKENS=2048
+MAX_STEPS=24
+DEEPSEEK_MAX_TOKENS=8192
 MAX_CONCURRENT_RUNS=3
 
 # 上下文压缩（一般不用改）
-CONTEXT_COMPACT_CHARS=7000
-CONTEXT_KEEP_CHARS=2400
-CONTEXT_SUMMARY_MAX_CHARS=1200
-HISTORY_COMPACT_CHARS=9000
-HISTORY_COMPACT_MESSAGES=12
-HISTORY_KEEP_MESSAGES=8
-HISTORY_SUMMARY_BATCH_MESSAGES=4
+CONTEXT_COMPACT_CHARS=32000
+CONTEXT_KEEP_CHARS=12000
+CONTEXT_SUMMARY_MAX_CHARS=4000
+HISTORY_COMPACT_CHARS=32000
+HISTORY_COMPACT_MESSAGES=32
+HISTORY_KEEP_MESSAGES=16
+HISTORY_SUMMARY_BATCH_MESSAGES=8
+HISTORY_INJECT_MESSAGES=32
+HISTORY_INJECT_CHARS=32000
+HISTORY_MESSAGE_MAX_CHARS=4000
 
 # 向量记忆（默认开启；设为 false 可做纯关键词消融）
 VECTOR_MEMORY_ENABLED=true
@@ -101,7 +104,7 @@ TOOL_PERMISSION_MODE=auto
 TOOL_PERMISSION_TIMEOUT=120
 # 单次命令超时（秒）与输出截断长度
 COMMAND_TIMEOUT=120
-COMMAND_MAX_OUTPUT_CHARS=12000
+COMMAND_MAX_OUTPUT_CHARS=20000
 ```
 
 也可以不用 `.env`，直接设置环境变量：
@@ -669,7 +672,7 @@ react_agent/
 
 ## 7. 测试
 
-离线测试（共 158 个用例，不需要 Key、不需要网络；符号链接用例在无权限的
+离线测试（共 159 个用例，不需要 Key、不需要网络；符号链接用例在无权限的
 Windows 环境会自动跳过）：
 
 ```bash
@@ -728,7 +731,7 @@ python agent.py --check-tools
 - 仍需注意：校验和实际连接之间理论上有 DNS rebinding 窗口，本项目没有做 IP 钉扎。
 
 **为什么回答被截断了？**
-- `DEEPSEEK_MAX_TOKENS` 默认 2048；长回答可在 `.env` 里调大。
+- `DEEPSEEK_MAX_TOKENS` 默认 8192；更长的代码或回答可在 `.env` 里继续调大。
   模型返回 `finish_reason=length` 时，推理轨迹里会出现“达到长度上限”的提示。
 
 **上下文压缩会不会丢信息？**

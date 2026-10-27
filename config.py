@@ -29,10 +29,10 @@ load_env_file()
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "").strip()
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/")
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat").strip()
-MAX_STEPS = int(os.getenv("MAX_STEPS", "8"))
+MAX_STEPS = int(os.getenv("MAX_STEPS", "24"))
 REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "90"))
-# 单次模型调用的输出上限。1024 容易把较长的最终答案截断，默认放宽到 2048。
-DEEPSEEK_MAX_TOKENS = int(os.getenv("DEEPSEEK_MAX_TOKENS", "2048"))
+# 单次模型调用的输出上限。代码与长答案容易把输出截断，默认放宽到 8192。
+DEEPSEEK_MAX_TOKENS = int(os.getenv("DEEPSEEK_MAX_TOKENS", "8192"))
 # Web 服务同时运行的推理任务上限，避免多个会话各自起线程把本机资源占满。
 MAX_CONCURRENT_RUNS = max(1, int(os.getenv("MAX_CONCURRENT_RUNS", "3")))
 # 调用 get_location 时等待用户在界面上授权浏览器定位的时长；超时回退到 IP 定位。
@@ -58,7 +58,7 @@ TOOL_PERMISSION_TIMEOUT = max(10, int(os.getenv("TOOL_PERMISSION_TIMEOUT", "120"
 
 # 本机命令执行：默认超时与输出上限。
 COMMAND_TIMEOUT = max(5, int(os.getenv("COMMAND_TIMEOUT", "120")))
-COMMAND_MAX_OUTPUT_CHARS = max(1000, int(os.getenv("COMMAND_MAX_OUTPUT_CHARS", "12000")))
+COMMAND_MAX_OUTPUT_CHARS = max(1000, int(os.getenv("COMMAND_MAX_OUTPUT_CHARS", "20000")))
 
 # 自进化 Harness：单代改动预算、测试超时和 Agent 最大工具轮数。
 EVOLUTION_MAX_DIFF_LINES = max(10, int(os.getenv("EVOLUTION_MAX_DIFF_LINES", "600")))
@@ -66,17 +66,21 @@ EVOLUTION_TEST_TIMEOUT = max(30, int(os.getenv("EVOLUTION_TEST_TIMEOUT", "300"))
 EVOLUTION_MAX_STEPS = max(5, int(os.getenv("EVOLUTION_MAX_STEPS", "40")))
 
 # 单轮 ReAct 上下文压缩：scratchpad 超过阈值后，把较早步骤摘要掉，只保留最近原文。
-CONTEXT_COMPACT_CHARS = max(800, int(os.getenv("CONTEXT_COMPACT_CHARS", "7000")))
-CONTEXT_KEEP_CHARS = max(300, int(os.getenv("CONTEXT_KEEP_CHARS", "2400")))
-CONTEXT_SUMMARY_MAX_CHARS = max(300, int(os.getenv("CONTEXT_SUMMARY_MAX_CHARS", "1200")))
+CONTEXT_COMPACT_CHARS = max(800, int(os.getenv("CONTEXT_COMPACT_CHARS", "32000")))
+CONTEXT_KEEP_CHARS = max(300, int(os.getenv("CONTEXT_KEEP_CHARS", "12000")))
+CONTEXT_SUMMARY_MAX_CHARS = max(300, int(os.getenv("CONTEXT_SUMMARY_MAX_CHARS", "4000")))
 
 # 跨轮会话历史压缩：历史过长时，把最近窗口之外的对话增量摘要并持久化。
-HISTORY_COMPACT_CHARS = max(2000, int(os.getenv("HISTORY_COMPACT_CHARS", "9000")))
-HISTORY_COMPACT_MESSAGES = max(6, int(os.getenv("HISTORY_COMPACT_MESSAGES", "12")))
-HISTORY_KEEP_MESSAGES = max(2, int(os.getenv("HISTORY_KEEP_MESSAGES", "8")))
+HISTORY_COMPACT_CHARS = max(2000, int(os.getenv("HISTORY_COMPACT_CHARS", "32000")))
+HISTORY_COMPACT_MESSAGES = max(6, int(os.getenv("HISTORY_COMPACT_MESSAGES", "32")))
+HISTORY_KEEP_MESSAGES = max(2, int(os.getenv("HISTORY_KEEP_MESSAGES", "16")))
 HISTORY_SUMMARY_BATCH_MESSAGES = max(
-    1, int(os.getenv("HISTORY_SUMMARY_BATCH_MESSAGES", "4"))
+    1, int(os.getenv("HISTORY_SUMMARY_BATCH_MESSAGES", "8"))
 )
+# 每轮实际注入提示词的历史窗口。与压缩阈值对齐，避免未摘要的旧消息被静默丢弃。
+HISTORY_INJECT_MESSAGES = max(2, int(os.getenv("HISTORY_INJECT_MESSAGES", "32")))
+HISTORY_INJECT_CHARS = max(500, int(os.getenv("HISTORY_INJECT_CHARS", "32000")))
+HISTORY_MESSAGE_MAX_CHARS = max(200, int(os.getenv("HISTORY_MESSAGE_MAX_CHARS", "4000")))
 
 # 向量记忆索引。没有额外 embedding API 时使用本地特征哈希，零依赖、可离线。
 # 可设为 false 做“向量检索 vs 纯关键词”的消融实验。

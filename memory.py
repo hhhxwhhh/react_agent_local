@@ -49,7 +49,7 @@ CONTEXT_MIN_SESSION_CHARS = 400
 CONTEXT_SESSION_SHARE = 0.6
 CONTEXT_VALUE_CHARS = 200
 RECALL_MAX_ITEMS = 50
-# recall 的列表输出要低于 run_tool 的 3000 字符观测上限，避免末尾提示被截掉。
+# recall 的列表输出单独控制预算，避免记忆较多时把观测撑得过大。
 RECALL_LIST_BUDGET = 2400
 # 语义检索结果里展示的单条 value 长度。
 SEARCH_VALUE_CHARS = 240
