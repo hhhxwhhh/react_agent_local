@@ -19,6 +19,8 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
+import tempfile
 import time
 import urllib.parse
 import xml.etree.ElementTree as ET
@@ -1707,6 +1709,25 @@ def _display_path(path: Path) -> str:
         return str(path)
 
 
+def _protected_paths() -> list[Path]:
+    root = Path(FILE_ROOT).expanduser().resolve()
+    return [root / ".git", root / "data", root / ".env"]
+
+
+def _is_protected_path(path: Path) -> bool:
+    """版本库、会话数据和密钥文件不允许被通用文件工具改写。"""
+    target = path.expanduser().resolve(strict=False)
+    for protected in _protected_paths():
+        if target == protected or protected in target.parents:
+            return True
+    return False
+
+
+def _ensure_writable_target(target: Path) -> None:
+    if _is_protected_path(target):
+        raise ValueError("不能通过通用文件工具修改 .git、data 或 .env 等受保护路径")
+
+
 def _is_within_workspace(path: Path) -> bool:
     """解析符号链接后仍位于 workspace 内，才允许访问。"""
     try:
@@ -1843,6 +1864,7 @@ def write_file(
     target = _resolve_path(path)
     if target == Path(FILE_ROOT).expanduser().resolve():
         raise ValueError("path 必须是文件路径，不能是项目根目录本身")
+    _ensure_writable_target(target)
     if target.exists() and target.is_dir():
         raise ValueError("目标是目录，不能写入")
     text = str(content)
@@ -1883,6 +1905,7 @@ def edit_file(
         raise ValueError(f"文件不存在：{_display_path(target)}")
     if target.is_dir():
         raise ValueError("目标是目录，不能编辑")
+    _ensure_writable_target(target)
 
     old = str(old_text)
     new = str(new_text)
@@ -1918,6 +1941,196 @@ def edit_file(
         f"已编辑：{_display_path(target)}"
         f"（替换 {replacements} 处，文件共 {target.stat().st_size} 字节）"
     )
+
+
+def _atomic_write_text(target: Path, text: str) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(
+        dir=str(target.parent), prefix=f".{target.name}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+        os.replace(temp_name, target)
+    except Exception:
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+        raise
+
+
+def apply_patch(
+    patches: list[dict[str, Any]],
+    *,
+    context: ToolContext | None = None,
+) -> str:
+    """原子地应用一组文本替换；任一匹配失败则整批不写入。
+
+    每个 patch 形如 {"path": "...", "old_text": "...", "new_text": "...",
+    "replace_all": false}。同一个文件可以出现多次，按顺序应用。
+    """
+    if not isinstance(patches, list) or not patches:
+        raise ValueError("patches 必须是非空数组")
+    if len(patches) > 50:
+        raise ValueError("单次最多应用 50 个 patch")
+
+    originals: dict[Path, str] = {}
+    current: dict[Path, str] = {}
+    replacements: dict[Path, int] = {}
+
+    for index, patch in enumerate(patches, 1):
+        if not isinstance(patch, dict):
+            raise ValueError(f"第 {index} 个 patch 必须是对象")
+        raw_path = str(patch.get("path") or "").strip()
+        if not raw_path:
+            raise ValueError(f"第 {index} 个 patch 缺少 path")
+        old = str(patch.get("old_text") or "")
+        new = str(patch.get("new_text") or "")
+        if not old:
+            raise ValueError(f"第 {index} 个 patch 的 old_text 不能为空")
+        replace_all = bool(_coerce_value(patch.get("replace_all", False), "boolean"))
+
+        target = _resolve_path(raw_path)
+        if not target.exists():
+            raise ValueError(f"文件不存在：{_display_path(target)}")
+        if target.is_dir():
+            raise ValueError(f"目标是目录，不能编辑：{_display_path(target)}")
+        _ensure_writable_target(target)
+        if target not in originals:
+            originals[target] = _read_text_file(target)
+            current[target] = originals[target]
+
+        count = current[target].count(old)
+        if count == 0:
+            raise ValueError(
+                f"第 {index} 个 patch 的 old_text 未找到：{_display_path(target)}"
+            )
+        if count > 1 and not replace_all:
+            raise ValueError(
+                f"第 {index} 个 patch 的 old_text 在 {_display_path(target)} "
+                f"出现 {count} 次；请提供更长的唯一片段，或设置 replace_all=true"
+            )
+        used = count if replace_all else 1
+        current[target] = current[target].replace(old, new, -1 if replace_all else 1)
+        replacements[target] = replacements.get(target, 0) + used
+
+    changed = [path for path in current if current[path] != originals[path]]
+    if not changed:
+        return "没有变化：所有 new_text 都与原文相同。"
+
+    detail_lines = [
+        f"{_display_path(path)}（替换 {replacements[path]} 处）" for path in changed
+    ]
+    _request_permission(
+        context,
+        tool="apply_patch",
+        title="批量文件编辑权限",
+        detail="Agent 想批量修改以下文件：\n" + "\n".join(detail_lines),
+        action="patch",
+        files=[str(path) for path in changed],
+    )
+
+    written: list[Path] = []
+    try:
+        for path in changed:
+            _atomic_write_text(path, current[path])
+            written.append(path)
+    except Exception:
+        # 多文件不是严格事务，但至少把已经写过的文件恢复原状。
+        for path in written:
+            try:
+                _atomic_write_text(path, originals[path])
+            except Exception:
+                pass
+        raise
+
+    lines = [f"已应用 {len(patches)} 个 patch，修改 {len(changed)} 个文件："]
+    for path in changed:
+        lines.append(
+            f"- {_display_path(path)}（替换 {replacements[path]} 处，"
+            f"{path.stat().st_size} 字节）"
+        )
+    return "\n".join(lines)
+
+
+def move_file(
+    source: str,
+    destination: str,
+    overwrite: bool = False,
+    *,
+    context: ToolContext | None = None,
+) -> str:
+    """移动或重命名文件/目录；覆盖已有文件需显式 overwrite=true。"""
+    src = _resolve_path(source)
+    dst = _resolve_path(destination)
+    if not src.exists():
+        raise ValueError(f"源路径不存在：{_display_path(src)}")
+    if src == Path(FILE_ROOT).expanduser().resolve():
+        raise ValueError("不能移动项目根目录")
+    if _is_protected_path(src) or _is_protected_path(dst):
+        raise ValueError("不能移动 .git、data 或 .env 等受保护路径")
+    if dst.exists() and not overwrite:
+        raise ValueError(f"目标已存在：{_display_path(dst)}；如需覆盖请设置 overwrite=true")
+    if dst.exists() and dst.is_dir():
+        raise ValueError("目标已有同名目录，拒绝覆盖")
+
+    _request_permission(
+        context,
+        tool="move_file",
+        title="文件移动权限",
+        detail=f"Agent 想移动：\n{src}\n→ {dst}",
+        action="move",
+        source=str(src),
+        destination=str(dst),
+    )
+    if dst.exists():
+        dst.unlink()
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(src), str(dst))
+    return f"已移动：{_display_path(src)} → {_display_path(dst)}"
+
+
+def delete_file(
+    path: str,
+    recursive: bool = False,
+    *,
+    context: ToolContext | None = None,
+) -> str:
+    """删除文件或目录；目录默认必须为空，recursive=true 才递归删除。"""
+    target = _resolve_path(path)
+    if not target.exists():
+        raise ValueError(f"路径不存在：{_display_path(target)}")
+    if target == Path(FILE_ROOT).expanduser().resolve():
+        raise ValueError("不能删除项目根目录")
+    if _is_protected_path(target):
+        raise ValueError("不能删除 .git、data 或 .env 等受保护路径")
+    if target.is_dir():
+        if any(protected in target.parents for protected in _protected_paths()):
+            raise ValueError("该目录包含受保护的 .git、data 或 .env 路径")
+        kind = "目录"
+    else:
+        kind = "文件"
+
+    _request_permission(
+        context,
+        tool="delete_file",
+        title="文件删除权限",
+        detail=f"Agent 想删除{kind}：\n{target}"
+        + ("\n（递归删除整个目录）" if target.is_dir() and recursive else ""),
+        action="delete",
+        path=str(target),
+        recursive=bool(recursive),
+    )
+
+    if target.is_dir():
+        if recursive:
+            shutil.rmtree(target)
+        else:
+            target.rmdir()
+    else:
+        target.unlink()
+    return f"已删除{kind}：{_display_path(target)}"
 
 
 # ---------------------------------------------------------------------------
@@ -2049,6 +2262,214 @@ def _terminate_process(process: subprocess.Popen) -> None:
             os.killpg(os.getpgid(process.pid), signal.SIGKILL)
         except (ProcessLookupError, PermissionError, OSError):
             process.kill()
+
+
+def _run_capture(
+    argv: list[str],
+    cwd: Path,
+    timeout: int,
+) -> tuple[int, str, float, bool]:
+    """运行非交互式子进程，返回退出码、合并输出、耗时、是否超时。"""
+    popen_kwargs: dict[str, Any] = {}
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        popen_kwargs["start_new_session"] = True
+
+    env = os.environ.copy()
+    env["GIT_PAGER"] = "cat"
+    env["GIT_TERMINAL_PROMPT"] = "0"
+
+    started = time.monotonic()
+    process = subprocess.Popen(
+        argv,
+        cwd=str(cwd),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        **popen_kwargs,
+    )
+    timed_out = False
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        _terminate_process(process)
+        stdout, stderr = process.communicate()
+    elapsed = time.monotonic() - started
+
+    pieces = []
+    if stdout:
+        pieces.append("stdout:\n" + _decode_command_output(stdout).rstrip())
+    if stderr:
+        pieces.append("stderr:\n" + _decode_command_output(stderr).rstrip())
+    output = "\n\n".join(pieces) if pieces else "（无输出）"
+    if len(output) > COMMAND_MAX_OUTPUT_CHARS:
+        output = output[:COMMAND_MAX_OUTPUT_CHARS] + "\n...[输出已截断]"
+    return process.returncode, output, elapsed, timed_out
+
+
+def run_tests(
+    pattern: str = "",
+    cwd: str = "",
+    timeout: int = 0,
+    *,
+    context: ToolContext | None = None,
+) -> str:
+    """运行项目测试套件；默认 discover tests/，也可指定 unittest 模块/用例。"""
+    workdir = _resolve_path(cwd or ".")
+    if not workdir.exists():
+        raise ValueError(f"工作目录不存在：{_display_path(workdir)}")
+    if not workdir.is_dir():
+        raise ValueError(f"工作目录不是目录：{_display_path(workdir)}")
+
+    pattern = str(pattern or "").strip()
+    limit_timeout = max(10, min(int(timeout or COMMAND_TIMEOUT), 600))
+    if pattern:
+        argv = [sys.executable, "-m", "unittest", "-v", pattern]
+    else:
+        argv = [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-v"]
+
+    _request_permission(
+        context,
+        tool="run_tests",
+        title="测试执行权限",
+        detail=f"Agent 想运行测试：\n目录：{workdir}\n"
+        + (f"目标：{pattern}" if pattern else "目标：discover tests/"),
+        action="test",
+        cwd=str(workdir),
+        pattern=pattern,
+    )
+
+    code, output, elapsed, timed_out = _run_capture(
+        argv, workdir, limit_timeout
+    )
+    if timed_out:
+        status = f"ERROR: 测试超时（{limit_timeout} 秒），已终止"
+    elif code == 0:
+        status = "结果：通过"
+    else:
+        status = f"结果：失败（退出码 {code}）"
+    return (
+        f"测试目标：{pattern or 'discover tests/'}\n"
+        f"目录：{workdir}\n"
+        f"{status}\n"
+        f"耗时：{elapsed:.2f}s\n\n{output}"
+    )
+
+
+_GIT_READONLY = {"status", "diff", "log", "show", "rev_parse", "branch_list"}
+_GIT_MUTATING = {"add", "commit", "restore", "branch", "tag", "checkout"}
+
+
+def git(
+    operation: str,
+    paths: list[str] | None = None,
+    message: str = "",
+    ref: str = "",
+    cwd: str = "",
+    *,
+    context: ToolContext | None = None,
+) -> str:
+    """执行受限的 Git 操作；只读操作免授权，写操作先请求用户确认。"""
+    op = str(operation or "").strip().lower()
+    if op not in _GIT_READONLY | _GIT_MUTATING:
+        raise ValueError(
+            "operation 只支持：status、diff、log、show、rev_parse、branch_list、"
+            "add、commit、restore、branch、tag、checkout"
+        )
+    if isinstance(paths, str):
+        paths = [paths]
+    paths = [str(item).strip() for item in (paths or []) if str(item).strip()]
+    if any(item.startswith("-") for item in paths):
+        raise ValueError("paths 不能以 - 开头")
+    ref = str(ref or "").strip()
+    message = str(message or "").strip()
+    if ref.startswith("-"):
+        raise ValueError("ref 不能以 - 开头")
+
+    workdir = _resolve_path(cwd or ".")
+    if not workdir.exists() or not workdir.is_dir():
+        raise ValueError(f"工作目录不存在：{_display_path(workdir)}")
+
+    if op == "status":
+        argv = ["git", "status", "--short", "--branch"]
+    elif op == "diff":
+        argv = ["git", "diff"] + (["--"] + paths if paths else [])
+    elif op == "log":
+        argv = ["git", "log", "--oneline", "-n", "20"]
+        if paths:
+            argv += ["--"] + paths
+    elif op == "show":
+        argv = ["git", "show", "--stat", "--patch", ref or "HEAD"]
+        if paths:
+            argv += ["--"] + paths
+    elif op == "rev_parse":
+        argv = ["git", "rev-parse", "--short", "HEAD"]
+    elif op == "branch_list":
+        argv = ["git", "branch", "--list"]
+    elif op == "add":
+        if not paths:
+            raise ValueError("add 操作需要 paths")
+        argv = ["git", "add", "--"] + paths
+    elif op == "commit":
+        if not message:
+            raise ValueError("commit 操作需要 message")
+        argv = ["git", "commit", "-m", message]
+    elif op == "restore":
+        if not paths:
+            raise ValueError("restore 操作需要 paths")
+        argv = ["git", "restore"]
+        if ref:
+            argv += ["--source", ref]
+        argv += ["--"] + paths
+    elif op == "branch":
+        if not ref:
+            raise ValueError("branch 操作需要 ref（新分支名）")
+        argv = ["git", "branch", ref]
+    elif op == "tag":
+        if not ref:
+            raise ValueError("tag 操作需要 ref（标签名）")
+        argv = ["git", "tag", ref]
+    else:  # checkout
+        if not ref:
+            raise ValueError("checkout 操作需要 ref（分支或提交）")
+        argv = ["git", "checkout", ref]
+
+    if op in _GIT_MUTATING:
+        _request_permission(
+            context,
+            tool="git",
+            title="Git 操作权限",
+            detail=(
+                f"Agent 想执行 Git 操作：{op}\n"
+                f"目录：{workdir}\n"
+                + (f"路径：{', '.join(paths)}\n" if paths else "")
+                + (f"ref：{ref}\n" if ref else "")
+                + (f"message：{message}" if message else "")
+            ),
+            action=op,
+            operation=op,
+            paths=paths,
+            ref=ref,
+        )
+
+    try:
+        code, output, elapsed, timed_out = _run_capture(argv, workdir, 60)
+    except FileNotFoundError as exc:
+        raise RuntimeError("找不到 git，请先安装 Git 并加入 PATH") from exc
+
+    if timed_out:
+        raise RuntimeError(f"git {op} 超时（60 秒）")
+    if code != 0:
+        raise RuntimeError(f"git {op} 失败（退出码 {code}）：\n{output}")
+    return (
+        f"Git 操作：{op}\n"
+        f"目录：{workdir}\n"
+        f"退出码：{code}\n"
+        f"耗时：{elapsed:.2f}s\n\n{output}"
+    )
 
 
 def run_command(
@@ -2604,6 +3025,123 @@ TOOL_SPECS: dict[str, dict] = {
         },
         "context": True,
     },
+    "apply_patch": {
+        "description": "原子地批量修改多个文件：一次提交多个精确文本替换，任一 old_text 校验失败则整批不落盘。适合自进化时跨文件重构。会先请求一次用户授权。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "patches": {
+                    "type": "array",
+                    "description": "要应用的修改列表，按顺序执行；同一个文件可出现多次",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string", "description": "文件路径"},
+                            "old_text": {
+                                "type": "string",
+                                "description": "要替换的原文，需包含足够上下文",
+                            },
+                            "new_text": {
+                                "type": "string",
+                                "description": "替换后的文本",
+                            },
+                            "replace_all": {
+                                "type": "boolean",
+                                "description": "是否替换全部匹配，默认 false",
+                            },
+                        },
+                        "required": ["path", "old_text", "new_text"],
+                    },
+                }
+            },
+            "required": ["patches"],
+        },
+        "context": True,
+    },
+    "move_file": {
+        "description": "移动或重命名文件/目录，自动创建目标父目录。会先请求用户授权；默认不覆盖已存在的目标。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "source": {"type": "string", "description": "源文件或目录路径"},
+                "destination": {"type": "string", "description": "目标路径"},
+                "overwrite": {
+                    "type": "boolean",
+                    "description": "目标文件已存在时是否覆盖，默认 false",
+                },
+            },
+            "required": ["source", "destination"],
+        },
+        "context": True,
+    },
+    "delete_file": {
+        "description": "删除文件或目录。目录默认必须为空；recursive=true 才递归删除。会先请求用户授权，.git、data、.env 等受保护路径不可删除。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "要删除的文件或目录路径"},
+                "recursive": {
+                    "type": "boolean",
+                    "description": "删除非空目录时设为 true，默认 false",
+                },
+            },
+            "required": ["path"],
+        },
+        "context": True,
+    },
+    "run_tests": {
+        "description": "运行项目测试套件并返回结构化结果。默认执行 python -m unittest discover -s tests -v；也可用 pattern 指定模块或用例。会先请求用户授权。自进化流程必须用它验证修改，不能改测试来伪造通过。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "pattern": {
+                    "type": "string",
+                    "description": "可选，unittest 模块或用例，例如 tests.test_agent.TestFileTools",
+                },
+                "cwd": {
+                    "type": "string",
+                    "description": "工作目录，默认项目根目录",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "description": "超时秒数，默认 120，最大 600",
+                },
+            },
+            "required": [],
+        },
+        "context": True,
+    },
+    "git": {
+        "description": "执行受限的 Git 操作，用于自进化前后的快照、对比、提交与回滚。只读：status、diff、log、show、rev_parse、branch_list；写操作：add、commit、restore、branch、tag、checkout。写操作会先请求用户授权。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "operation": {
+                    "type": "string",
+                    "description": "status/diff/log/show/rev_parse/branch_list/add/commit/restore/branch/tag/checkout",
+                },
+                "paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "可选，文件路径列表；add/restore 必填",
+                },
+                "message": {
+                    "type": "string",
+                    "description": "commit 操作的提交信息",
+                },
+                "ref": {
+                    "type": "string",
+                    "description": "分支名、标签名或提交引用；branch/tag/checkout 必填",
+                },
+                "cwd": {
+                    "type": "string",
+                    "description": "Git 仓库目录，默认项目根目录",
+                },
+            },
+            "required": ["operation"],
+        },
+        "context": True,
+    },
     "remember": {
         "description": "保存一条长期记忆（键值对），用于记住用户偏好、常用城市、任务结论等。注意：会话记忆只属于当前对话；全局记忆跨对话共享。",
         "parameters": {
@@ -2718,6 +3256,11 @@ TOOL_FUNCS: dict[str, Callable[..., str]] = {
     "write_file": write_file,
     "search_files": search_files,
     "edit_file": edit_file,
+    "apply_patch": apply_patch,
+    "move_file": move_file,
+    "delete_file": delete_file,
+    "run_tests": run_tests,
+    "git": git,
     "run_command": run_command,
     "remember": remember,
     "recall": recall,

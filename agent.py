@@ -44,7 +44,12 @@ STOP_SEQUENCES = ["Observation:", "Observation："]
 STATE_CHANGING_TOOLS = {
     "write_file",
     "edit_file",
+    "apply_patch",
+    "move_file",
+    "delete_file",
     "run_command",
+    "run_tests",
+    "git",
     "remember",
     "forget",
 }
@@ -1033,6 +1038,8 @@ class ReActAgent:
 
 
 def _check_tools() -> int:
+    check_file = "demo/tool_check_runtime.txt"
+    moved_file = "demo/tool_check_runtime_moved.txt"
     checks = [
         ("get_current_time", {"location": "北京"}),
         ("date_calc", {"start_date": "2026-10-20", "end_date": "2026-12-31"}),
@@ -1054,20 +1061,43 @@ def _check_tools() -> int:
         ("fetch_url", {"url": "https://arxiv.org/abs/2210.03629", "max_chars": 500}),
         (
             "write_file",
-            {"path": "demo/tool_check.txt", "content": "本地 ReAct Agent 工具检查通过。\n"},
+            {"path": check_file, "content": "本地 ReAct Agent 工具检查通过。\n"},
         ),
-        ("read_file", {"path": "demo/tool_check.txt"}),
+        ("read_file", {"path": check_file}),
         (
             "edit_file",
             {
-                "path": "demo/tool_check.txt",
+                "path": check_file,
                 "old_text": "工具检查通过",
                 "new_text": "工具检查通过（edit）",
             },
         ),
+        (
+            "apply_patch",
+            {
+                "patches": [
+                    {
+                        "path": check_file,
+                        "old_text": "工具检查通过（edit）",
+                        "new_text": "工具检查通过（patch）",
+                    }
+                ]
+            },
+        ),
+        ("run_tests", {"pattern": "tests.test_agent.TestFileTools.test_write_read_and_list"}),
+        ("git", {"operation": "status"}),
         ("run_command", {"command": "echo react-agent-ok", "cwd": "demo"}),
+        (
+            "move_file",
+            {
+                "source": check_file,
+                "destination": moved_file,
+            },
+        ),
+        ("read_file", {"path": moved_file}),
         ("search_files", {"keyword": "工具检查", "path": "demo"}),
         ("list_files", {"path": "demo"}),
+        ("delete_file", {"path": moved_file}),
         ("remember", {"key": "_self_check", "value": "工具检查通过"}),
         ("recall", {"key": "_self_check"}),
         ("search_memory", {"query": "工具检查"}),
@@ -1095,7 +1125,11 @@ def _check_tools() -> int:
     if failures:
         print(_yellow(f"有 {failures}/{len(checks)} 个工具失败，其余工具可用。"))
     else:
-        print(_green(f"全部 {len(checks)} 个工具检查通过。"))
+        print(
+            _green(
+                f"全部 {len(checks)} 项检查通过（覆盖 {len(TOOL_SPECS)} 个工具）。"
+            )
+        )
     return 0
 
 
@@ -1111,7 +1145,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--yes",
         action="store_true",
-        help="自动允许写文件、编辑文件和执行命令（高风险，仅限受信任任务）",
+        help="自动允许写文件、编辑/移动/删除、运行测试、Git 写操作和命令执行（高风险，仅限受信任任务）",
     )
     parser.add_argument(
         "--check-tools", action="store_true", help="只检查本地工具，不需要 API Key"
@@ -1162,9 +1196,9 @@ def _show_memories() -> None:
 def _repl(agent: ReActAgent) -> int:
     print(_bold("\n本地 ReAct Agent（DeepSeek）"))
     print("工具：天气 / 空气质量 / 必应搜索 / 网页抓取 / 时间 / 日期计算")
-    print("      单位换算 / 本机文件 / 文件搜索 / 命令执行 / 长期记忆 / 汇率 / 计算器")
+    print("      单位换算 / 本机文件 / 批量补丁 / 命令执行 / 测试 / Git / 长期记忆")
     print("输入问题开始；exit 退出，:help 查看帮助")
-    print("写文件、编辑文件、执行命令前会在终端请求确认；--yes 可跳过。")
+    print("写文件、编辑/移动/删除、运行测试、Git 写操作和命令执行前会请求确认；--yes 可跳过。")
     print("=" * 60)
 
     history: list[dict] = []
@@ -1193,6 +1227,7 @@ def _repl(agent: ReActAgent) -> int:
             print("  - 距离 2027 年元旦还有多少天？")
             print("  - 100 华氏度是多少摄氏度？5 公里等于多少英里？")
             print("  - 查一下上海天气，保存到 notes/shanghai.md 并读出来")
+            print("  - 查看 git 状态，给当前版本打 tag，然后修改 tools.py 并运行测试")
             print("  - 记住我的常用城市是杭州；以后查天气默认用它")
             print("  - :memory 查看全局记忆，:forget 键名 删除记忆")
             print("  - :clear 清空当前对话历史，exit 退出")

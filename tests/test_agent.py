@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -28,16 +29,21 @@ from agent import (  # noqa: E402
 from tool_context import ToolContext  # noqa: E402
 from tools import (  # noqa: E402
     WORKSPACE_DIR,
+    apply_patch,
     calculate,
     convert_units,
     date_calc,
+    delete_file,
     edit_file,
     get_current_time,
+    git,
     list_files,
+    move_file,
     read_file,
     recall,
     remember,
     run_command,
+    run_tests,
     run_tool,
     search_files,
     write_file,
@@ -380,6 +386,137 @@ class TestFileTools(unittest.TestCase):
                 result = search_files("TOPSECRET", str(workspace_dir))
             self.assertNotIn("TOPSECRET", result)
             self.assertNotIn("link.txt", result)
+
+
+    def test_apply_patch_is_atomic_and_requires_permission(self):
+        write_file(f"{self.folder}/a.txt", "alpha\nbeta")
+        write_file(f"{self.folder}/b.txt", "gamma\ndelta")
+        allow = ToolContext(request_tool_permission=lambda payload: True)
+
+        result = apply_patch(
+            [
+                {
+                    "path": f"{self.folder}/a.txt",
+                    "old_text": "beta",
+                    "new_text": "BETA",
+                },
+                {
+                    "path": f"{self.folder}/b.txt",
+                    "old_text": "delta",
+                    "new_text": "DELTA",
+                },
+            ],
+            context=allow,
+        )
+        self.assertIn("修改 2 个文件", result)
+        self.assertIn("BETA", read_file(f"{self.folder}/a.txt"))
+        self.assertIn("DELTA", read_file(f"{self.folder}/b.txt"))
+
+        # 第二个 patch 匹配失败时，第一个 patch 也不应落盘。
+        with self.assertRaises(ValueError):
+            apply_patch(
+                [
+                    {
+                        "path": f"{self.folder}/a.txt",
+                        "old_text": "BETA",
+                        "new_text": "BETA2",
+                    },
+                    {
+                        "path": f"{self.folder}/b.txt",
+                        "old_text": "不存在的原文",
+                        "new_text": "x",
+                    },
+                ],
+                context=allow,
+            )
+        self.assertIn("BETA", read_file(f"{self.folder}/a.txt"))
+        self.assertNotIn("BETA2", read_file(f"{self.folder}/a.txt"))
+
+        deny = ToolContext(request_tool_permission=lambda payload: False)
+        with self.assertRaises(PermissionError):
+            apply_patch(
+                [
+                    {
+                        "path": f"{self.folder}/a.txt",
+                        "old_text": "BETA",
+                        "new_text": "BETA3",
+                    }
+                ],
+                context=deny,
+            )
+        self.assertNotIn("BETA3", read_file(f"{self.folder}/a.txt"))
+
+    def test_move_and_delete_file(self):
+        write_file(f"{self.folder}/move_source.txt", "move-me")
+        allow = ToolContext(request_tool_permission=lambda payload: True)
+        moved = move_file(
+            f"{self.folder}/move_source.txt",
+            f"{self.folder}/moved/target.txt",
+            context=allow,
+        )
+        self.assertIn("已移动", moved)
+        self.assertIn("move-me", read_file(f"{self.folder}/moved/target.txt"))
+
+        deleted = delete_file(f"{self.folder}/moved/target.txt", context=allow)
+        self.assertIn("已删除", deleted)
+        self.assertFalse((self.directory / "moved" / "target.txt").exists())
+
+    def test_protected_paths_are_blocked(self):
+        allow = ToolContext(request_tool_permission=lambda payload: True)
+        for protected in (".git", "data", ".env"):
+            with self.assertRaises(ValueError):
+                delete_file(protected, recursive=True, context=allow)
+        with self.assertRaises(ValueError):
+            write_file(".env", "should-not-write")
+        with self.assertRaises(ValueError):
+            edit_file("data/memory.json", "x", "y")
+        with self.assertRaises(ValueError):
+            apply_patch(
+                [
+                    {
+                        "path": ".env",
+                        "old_text": "DEEPSEEK",
+                        "new_text": "LEAKED",
+                    }
+                ],
+                context=allow,
+            )
+
+    def test_run_tests_returns_structured_result(self):
+        allow = ToolContext(request_tool_permission=lambda payload: True)
+        result = run_tests(
+            pattern="tests.test_agent.TestFileTools.test_write_read_and_list",
+            context=allow,
+        )
+        self.assertIn("结果：通过", result)
+        self.assertIn("Ran 1 test", result)
+
+    def test_git_status_and_write_permission(self):
+        if shutil.which("git") is None:
+            self.skipTest("当前环境没有 git")
+        repo = Path(tempfile.mkdtemp(prefix="git_test_"))
+        self.addCleanup(shutil.rmtree, repo, True)
+        subprocess.run(
+            ["git", "init"],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        status = git("status", cwd=str(repo))
+        self.assertIn("Git 操作：status", status)
+
+        allow = ToolContext(request_tool_permission=lambda payload: True)
+        (repo / "tracked.txt").write_text("hello", encoding="utf-8")
+        added = git("add", paths=["tracked.txt"], cwd=str(repo), context=allow)
+        self.assertIn("Git 操作：add", added)
+        self.assertIn("tracked.txt", git("status", cwd=str(repo)))
+
+        deny = ToolContext(request_tool_permission=lambda payload: False)
+        with self.assertRaises(PermissionError):
+            git("add", paths=["tracked.txt"], cwd=str(repo), context=deny)
 
 
 class TestLoopGuards(unittest.TestCase):

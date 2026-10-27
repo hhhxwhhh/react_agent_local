@@ -175,8 +175,10 @@ python agent.py "把北京天气和汇率信息整理成简报，保存到 notes
 python agent.py "100 华氏度是多少摄氏度？5 公里等于多少英里？"
 python agent.py "记住我的常用城市是杭州；以后查天气默认用它"
 python agent.py "在项目里搜索提到 ReAct 的文件"
-python agent.py "读取 E:\react_agent\README.md，把其中工具数量改成 21"
+python agent.py "读取 E:\react_agent\README.md，把其中工具数量改成 26"
 python agent.py "写一个 Python 脚本计算前 20 个斐波那契数，运行并告诉我结果"
+python agent.py "查看 git 状态，运行测试；如果失败就分析原因并给出最小修复方案"
+python agent.py "用 apply_patch 修改一个工具的错误提示，然后运行相关测试"
 ```
 
 交互模式：
@@ -202,11 +204,12 @@ CLI 交互模式会在当前进程内保留最近 10 轮对话，并支持：
 
 ```bash
 python agent.py --max-steps 10 --model deepseek-chat --no-color "问题"
-# 信任当前任务时跳过写文件/改文件/执行命令的终端确认
+# 信任当前任务时跳过本机写操作与命令执行的终端确认
 python agent.py --yes "重构 demo/ 下的脚本并运行测试"
 ```
 
-CLI 在 `write_file` / `edit_file` / `run_command` 前会打印目标路径或完整命令，
+CLI 在 `write_file` / `edit_file` / `apply_patch` / `move_file` / `delete_file` /
+`run_tests` / `git` 写操作 / `run_command` 前会打印目标路径、命令或 Git 操作，
 并等待 `y/N`；输入非 `y`、直接回车、`Ctrl+C` 或 `Ctrl+D` 都按拒绝处理。
 `--yes` 只跳过工具授权，不影响 `get_location` 的定位授权流程。
 
@@ -286,7 +289,12 @@ Question ───────>│  DeepSeek（system + scratchpad）│
 | `read_file` | `path`, `max_chars` | 读取本机文本文件（UTF-8/GB18030，最大 5 MB） |
 | `write_file` | `path`, `content`, `append` | 写入或追加文本文件，自动创建父目录；需授权 |
 | `edit_file` | `path`, `old_text`, `new_text`, `replace_all` | 精确替换文件片段；`old_text` 必须唯一，否则报错；需授权 |
+| `apply_patch` | `patches` | 原子地批量修改多个文件；任一匹配失败则整批不落盘；需授权 |
+| `move_file` | `source`, `destination`, `overwrite` | 移动或重命名文件/目录；需授权 |
+| `delete_file` | `path`, `recursive` | 删除文件或目录；`.git` / `data` / `.env` 受保护；需授权 |
 | `search_files` | `keyword`, `path`, `search_content`, `max_results` | 按路径/文件名或文件内容搜索本机目录 |
+| `run_tests` | `pattern`, `cwd`, `timeout` | 运行 unittest 测试套件并返回结构化结果；需授权 |
+| `git` | `operation`, `paths`, `message`, `ref`, `cwd` | status/diff/log/show/rev_parse/branch_list；add/commit/restore/branch/tag/checkout 需授权 |
 | `run_command` | `command`, `cwd`, `timeout` | 执行 shell 命令或脚本；自动选择 Git Bash/PowerShell；需授权 |
 | `remember` | `key`, `value`, `scope`, `ttl_days` | 保存记忆。`scope=session` 只属于当前对话；`scope=global` 跨对话共享；`ttl_days` 可设置有效期 |
 | `recall` | `key`, `scope` | 读取记忆；省略 key 时列出全部 |
@@ -326,7 +334,7 @@ Question ───────>│  DeepSeek（system + scratchpad）│
 - 提示词要求只用必要命令、优先只读操作，避免 `rm -rf`、格式化磁盘、
   批量删除和系统配置修改，也不要启动交互式或长期运行的服务。
 
-### 工具权限（写文件 / 编辑 / 执行命令）
+### 工具权限（写文件 / 编辑 / 测试 / Git / 命令）
 
 与定位授权类似，高风险工具由调用触发一次性授权：
 
@@ -344,6 +352,28 @@ POST: /api/tool-permission
 - 拒绝会变成工具错误 Observation，模型必须换方案或向用户说明，不能假装成功；
 - 等待时长由 `TOOL_PERMISSION_TIMEOUT`（默认 120 秒）控制；
 - `REQUIRE_TOOL_APPROVAL=false` 可关闭该确认（仅建议在受控脚本中使用）。
+
+### 自进化的推荐闭环
+
+新增的 `apply_patch` / `run_tests` / `git` 让 Agent 可以修改自己的源码并验证，
+但“改代码”不等于“进化”。推荐把流程固定为：
+
+```text
+git status / git diff
+  → 建立回滚点（git tag 或 commit）
+  → 用 apply_patch 做最小修改
+  → run_tests 跑完整测试
+  → 通过则保留；失败则 git restore / 回到上一个 tag
+  → 记录“改了什么、为什么、测试结果”
+```
+
+约束：
+
+- **不能修改 `tests/` 或评测脚本来让测试通过**；测试是选择信号，不是优化目标；
+- `.git`、`data/`、`.env`、权限确认逻辑和安全边界默认不可删除/移动；
+- 不要执行 `git push`、强制推送、改写历史或删除分支/标签；
+- 测试通过只证明工程正确性；要证明“能力变强”，还需要固定任务集、baseline
+  和 held-out 评测，工具层目前没有替你伪造这个信号。
 
 ### GPS 定位（工具调用时授权）
 
@@ -521,7 +551,7 @@ react_agent/
 ├── tool_context.py     # 工具运行上下文（会话、记忆范围、GPS/工具授权回调）
 ├── llm.py              # DeepSeek Chat Completions 客户端（含重试）
 ├── prompts.py          # ReAct 系统提示词（含记忆与工具安全规则）
-├── tools.py            # 二十一个工具 + 工具注册表
+├── tools.py            # 二十六个工具 + 工具注册表
 ├── config.py           # .env / 环境变量加载
 ├── web/
 │   ├── index.html      # 聊天界面
@@ -554,7 +584,7 @@ react_agent/
 
 ## 7. 测试
 
-离线测试（共 133 个用例，不需要 Key、不需要网络；符号链接用例在无权限的
+离线测试（共 138 个用例，不需要 Key、不需要网络；符号链接用例在无权限的
 Windows 环境会自动跳过）：
 
 ```bash
@@ -563,8 +593,10 @@ python -m unittest discover -s tests -v
 
 覆盖内容：ReAct 解析与循环、引用提取、重复调用拦截、格式错误收口、取消检查、
 token 用量累计、工具安全、工作区模式与符号链接逃逸、非受限模式外部路径读写、
-`edit_file` 唯一匹配校验、写文件/命令授权（允许与拒绝）、命令执行、
-SSRF 重定向拦截、AQI 分级、会话 CRUD、会话/全局记忆隔离、记忆并发写、
+`edit_file` 唯一匹配校验、`apply_patch` 原子回滚、移动/删除与受保护路径拦截、
+写文件/测试/Git/命令授权（允许与拒绝）、命令执行、`run_tests` 结构化结果、
+Git status/add 与权限校验、SSRF 重定向拦截、AQI 分级、会话 CRUD、
+会话/全局记忆隔离、记忆并发写、
 TTL 与过期清理、容量上限、上下文预算、单轮/跨轮上下文压缩与摘要失败回退、
 旧记忆迁移、向量索引的增量同步与作用域隔离、语义检索与关键词兜底、
 位置工具（含私网 IP 拒绝与供应商回退）、浏览器 GPS 坐标格式化、
@@ -641,8 +673,10 @@ python agent.py --check-tools
 - `calculate` 使用 AST 白名单求值，不会执行任意 Python 代码。
 - `fetch_url` 只允许 http/https；手动跟随重定向并逐跳校验公网地址，
   阻止回环/内网/链路本地/保留地址，响应体限制 2 MB。
-- 默认允许访问本机任意文件路径；写文件、编辑文件、执行命令前必须由用户允许一次。
-  `REQUIRE_TOOL_APPROVAL=false` 会关闭确认，只应在隔离或受控环境中使用。
+- 默认允许访问本机任意文件路径；写文件、编辑/移动/删除、批量补丁、运行测试、
+  Git 写操作和执行命令前必须由用户允许一次。`.git`、`data/`、`.env` 默认禁止
+  通过通用文件工具写入、移动或删除。`REQUIRE_TOOL_APPROVAL=false` 会关闭确认，
+  只应在隔离或受控环境中使用。
 - `run_command` 直接执行本机命令，超时上限 600 秒；它不是安全沙箱，模型仍可能
   执行破坏性操作，因此提示词禁止高危命令，且每次调用都需要用户确认。
 - `FILE_ACCESS_MODE=workspace` 可以恢复旧沙箱；工作区模式会拒绝 `../`、外部绝对

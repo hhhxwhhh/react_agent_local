@@ -96,7 +96,7 @@ def figure_architecture():
     _title(
         fig,
         "手写 ReAct Agent：总体架构",
-        "固定 DeepSeek 策略 · 21 个本地工具 · 分层记忆 · 人类在环授权",
+        "固定 DeepSeek 策略 · 26 个本地工具 · 分层记忆 · 人类在环授权",
     )
 
     # Web UI
@@ -159,7 +159,7 @@ def figure_architecture():
     ax.text(
         122,
         34,
-        "外部信息 7 · 计算/时间 4\n文件/命令 6 · 记忆 4\n\n统一 schema / 参数校验\n异常转 Observation",
+        "外部信息 7 · 计算/时间 4\n文件/命令 11 · 记忆 4\n\n统一 schema / 参数校验\n异常转 Observation",
         ha="center",
         va="center",
         fontsize=9.8,
@@ -223,7 +223,7 @@ def figure_architecture():
 
 def figure_tests():
     rows = [
-        ("test_agent.py", "ReAct 循环 / 解析 / 工具", 56),
+        ("test_agent.py", "ReAct 循环 / 解析 / 工具", 61),
         ("test_sessions.py", "会话 / 记忆 / Web API", 36),
         ("test_vector_memory.py", "向量检索 / 位置与地理", 28),
         ("test_memory.py", "记忆并发 / TTL / 容量", 13),
@@ -255,7 +255,7 @@ def figure_tests():
             color=INK,
         )
 
-    fig.text(0.06, 0.93, "离线测试分布：133 个用例", fontsize=20, fontweight="bold", color=INK)
+    fig.text(0.06, 0.93, "离线测试分布：138 个用例", fontsize=20, fontweight="bold", color=INK)
     fig.text(
         0.06,
         0.865,
@@ -266,7 +266,7 @@ def figure_tests():
     fig.text(
         0.92,
         0.80,
-        "132 通过\n1 跳过",
+        "137 通过\n1 跳过",
         ha="right",
         va="top",
         fontsize=13,
