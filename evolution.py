@@ -833,7 +833,8 @@ def _similar(a: str, b: str) -> bool:
         return False
     if left in right or right in left:
         return True
-    return SequenceMatcher(None, left, right).ratio() >= 0.6
+    # 同一目标换一种措辞复述时相似度常在 0.5 左右，阈值取 0.45。
+    return SequenceMatcher(None, left, right).ratio() >= 0.45
 
 
 def _auto_objective() -> tuple[str, dict[str, Any]]:
