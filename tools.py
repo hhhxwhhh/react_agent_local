@@ -1787,6 +1787,25 @@ def _read_text_file(target: Path) -> str:
             raise ValueError("无法按文本解码（可能是二进制文件）") from exc
 
 
+def _detect_newline(text: str) -> str:
+    """检测文本主要换行风格：含 CRLF 则返回 "\r\n"，否则返回 "\n"。"""
+    if "\r\n" in text:
+        return "\r\n"
+    return "\n"
+
+
+def _normalize_newlines(text: str) -> str:
+    """把 CRLF / CR 统一为 LF，便于跨换行风格精确匹配。"""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _restore_newlines(text: str, newline: str) -> str:
+    """把 LF 文本还原为目标换行风格；newline 为 "\n" 时原样返回。"""
+    if newline == "\n":
+        return text
+    return text.replace("\n", newline)
+
+
 def list_files(
     path: str = ".",
     recursive: bool = False,
@@ -1975,7 +1994,11 @@ def edit_file(
         raise ValueError("old_text 不能为空")
 
     text = _read_text_file(target)
-    count = text.count(old)
+    newline = _detect_newline(text)
+    match_text = _normalize_newlines(text)
+    match_old = _normalize_newlines(old)
+    match_new = _normalize_newlines(new)
+    count = match_text.count(match_old)
     if count == 0:
         raise ValueError("old_text 在文件中未找到；请先 read_file 确认原文")
     if count > 1 and not replace_all:
@@ -1995,7 +2018,8 @@ def edit_file(
         replacements=replacements,
     )
 
-    updated = text.replace(old, new, -1 if replace_all else 1)
+    updated = match_text.replace(match_old, match_new, -1 if replace_all else 1)
+    updated = _restore_newlines(updated, newline)
     with target.open("w", encoding="utf-8", newline="") as handle:
         handle.write(updated)
 
@@ -2039,6 +2063,7 @@ def apply_patch(
 
     originals: dict[Path, str] = {}
     current: dict[Path, str] = {}
+    newlines: dict[Path, str] = {}
     replacements: dict[Path, int] = {}
 
     for index, patch in enumerate(patches, 1):
@@ -2061,9 +2086,12 @@ def apply_patch(
         _ensure_writable_target(target)
         if target not in originals:
             originals[target] = _read_text_file(target)
-            current[target] = originals[target]
+            newlines[target] = _detect_newline(originals[target])
+            current[target] = _normalize_newlines(originals[target])
 
-        count = current[target].count(old)
+        match_old = _normalize_newlines(old)
+        match_new = _normalize_newlines(new)
+        count = current[target].count(match_old)
         if count == 0:
             raise ValueError(
                 f"第 {index} 个 patch 的 old_text 未找到：{_display_path(target)}"
@@ -2074,7 +2102,9 @@ def apply_patch(
                 f"出现 {count} 次；请提供更长的唯一片段，或设置 replace_all=true"
             )
         used = count if replace_all else 1
-        current[target] = current[target].replace(old, new, -1 if replace_all else 1)
+        current[target] = current[target].replace(
+            match_old, match_new, -1 if replace_all else 1
+        )
         replacements[target] = replacements.get(target, 0) + used
 
     changed = [path for path in current if current[path] != originals[path]]
@@ -2096,7 +2126,7 @@ def apply_patch(
     written: list[Path] = []
     try:
         for path in changed:
-            _atomic_write_text(path, current[path])
+            _atomic_write_text(path, _restore_newlines(current[path], newlines[path]))
             written.append(path)
     except Exception:
         # 多文件不是严格事务，但至少把已经写过的文件恢复原状。
