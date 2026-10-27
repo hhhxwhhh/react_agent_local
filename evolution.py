@@ -777,6 +777,72 @@ def _extract_next_suggestion(entry: dict[str, Any]) -> str:
     return _one_line(value.strip(), 180)
 
 
+def _next_suggestions(entry: dict[str, Any], limit: int = 5) -> list[str]:
+    """提取某一代最终答案里的全部“下一代建议”。"""
+    agent_record = entry.get("agent")
+    if not isinstance(agent_record, dict):
+        return []
+    answer = str(agent_record.get("final_answer") or "")
+    match = re.search(
+        r"对下一代\s*Harness\s*的建议\s*[:：](.*)", answer, re.I | re.S
+    )
+    if not match:
+        return []
+    suggestions: list[str] = []
+    for line in match.group(1).splitlines():
+        item = re.match(r"\s*(?:\d+[.)、]|[-*])\s+(.+)", line)
+        if not item:
+            continue
+        value = _one_line(item.group(1).strip(), 240)
+        if value:
+            suggestions.append(value)
+    return suggestions[:limit]
+
+
+def _suggestion_is_feasible(text: str) -> bool:
+    """过滤需要改 tests/ 或只改文档的建议；这两类在当前冻结边界下不可执行。"""
+    lowered = str(text or "").lower()
+    blocked = (
+        "tests/",
+        "补充测试",
+        "新增测试",
+        "加测试",
+        "回归测试",
+        "readme",
+        "文档",
+        "docs/",
+    )
+    return not any(term in lowered for term in blocked)
+
+
+def _auto_objective() -> tuple[str, dict[str, Any]]:
+    """用上一代自己的复盘建议生成下一代目标；没有可用建议时返回空串。"""
+    entries = [
+        entry
+        for entry in _read_ledger()
+        if entry.get("decision") in {"accepted", "rejected"}
+    ]
+    if not entries:
+        return "", {"source": "default", "candidates": []}
+
+    latest = entries[-1]
+    candidates = _next_suggestions(latest)
+    recent = {
+        _one_line(str(entry.get("objective") or ""), 240)
+        for entry in entries[-5:]
+    }
+    feasible = [item for item in candidates if _suggestion_is_feasible(item)]
+    chosen = next((item for item in feasible if item not in recent), "")
+    info = {
+        "source": f"gen-{latest.get('generation', '?')}-retrospective",
+        "generation": latest.get("generation"),
+        "candidates": candidates,
+        "feasible": feasible,
+        "chosen": chosen,
+    }
+    return chosen, info
+
+
 def _generation_history(limit: int = 6) -> str:
     """把最近 accepted/rejected 记录压缩成可注入提示词的历史摘要。"""
     entries = [
@@ -1122,13 +1188,24 @@ def run_single_generation(args: argparse.Namespace) -> int:
     """运行一代完整闭环；返回 0 表示已处理（接受或拒绝），1 表示流程错误。"""
     started = time.monotonic()
     generation = _next_generation(ROOT)
-    objective = str(args.objective or "").strip() or harness.default_objective()
+    objective = str(args.objective or "").strip()
+    objective_info: dict[str, Any] = {
+        "source": "cli",
+        "chosen": objective,
+    }
+    if not objective:
+        # 默认不人工指定目标：直接采用上一代复盘里的第一条可执行建议。
+        objective, objective_info = _auto_objective()
+    if not objective:
+        objective = harness.default_objective()
+        objective_info = {"source": "default", "chosen": objective}
     record: dict[str, Any] = {
         "generation": generation,
         "started_at": _now(),
         "finished_at": None,
         "model": args.model,
         "objective": objective,
+        "objective_source": objective_info,
         "baseline": {},
         "candidate": {},
         "agent": {"permissions": []},
@@ -1139,6 +1216,7 @@ def run_single_generation(args: argparse.Namespace) -> int:
 
     print(f"\n{'=' * 64}")
     print(f"自进化第 {generation} 代")
+    print(f"目标来源：{objective_info.get('source', 'cli')}")
     print(f"目标：{_one_line(objective, 120)}")
     print(f"{'=' * 64}")
 
@@ -1560,7 +1638,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="自进化 Harness：让当前 Agent 开发下一代自己"
     )
-    parser.add_argument("--objective", default="", help="本代要改进的具体目标")
+    parser.add_argument(
+        "--objective",
+        default="",
+        help="本代要改进的具体目标；不传时自动采用上一代复盘里的可执行建议",
+    )
     parser.add_argument(
         "--generations", type=int, default=1, help="连续运行多少代（每代用最新代码）"
     )
