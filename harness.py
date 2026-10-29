@@ -74,13 +74,42 @@ def classify_json_truncation_failures(failures: list[str] | None) -> dict:
 
 _WRITE_TOOLS = ("apply_patch", "write_file")
 
+# 失败 Observation 的判定标记。真实轨迹里工具失败并不总是以 "ERROR" 开头：
+# run_command 失败是 "退出码：1"，JSON 截断是 "parse_action_input" / "Invalid JSON"
+# 等报错文本。只认 "ERROR" 会让 json_truncation_failure 永远无法触发。
+_FAILURE_MARKERS = (
+    "error",
+    "traceback",
+    "invalid json",
+    "parse_action_input",
+    "unterminated",
+    "expecting",
+    "invalid control character",
+    "退出码：1",
+    "退出码：2",
+    "exit code: 1",
+    "exit code: 2",
+)
+
+
+def _is_failure_observation(observation: str) -> bool:
+    """判断一条 Observation 是否代表工具失败。"""
+    text = str(observation or "").strip()
+    if not text:
+        return False
+    if text.startswith("ERROR"):
+        return True
+    lowered = text.lower()
+    return any(marker in lowered for marker in _FAILURE_MARKERS)
+
 
 def extract_tool_failures(trace: list[dict] | None) -> list[str]:
     """从真实轨迹中提取 apply_patch / write_file 的失败 Observation。
 
     trace 的每个 step 是 dict，含 tool / input / observation 字段（与
-    evolution.py 的 _trace_metrics 一致）。失败判定：observation 去空白后以
-    "ERROR" 开头。返回失败信息列表，供 classify_json_truncation_failures 归类。
+    evolution.py 的 _trace_metrics 一致）。失败判定见 _is_failure_observation：
+    除 "ERROR" 开头外，也识别退出码非 0、Traceback、JSON 解析报错等真实失败文本。
+    返回失败信息列表，供 classify_json_truncation_failures 归类。
     """
     failures: list[str] = []
     for item in trace or []:
@@ -89,7 +118,7 @@ def extract_tool_failures(trace: list[dict] | None) -> list[str]:
         if item.get("tool") not in _WRITE_TOOLS:
             continue
         observation = str(item.get("observation") or "").strip()
-        if observation.startswith("ERROR"):
+        if _is_failure_observation(observation):
             failures.append(observation)
     return failures
 
