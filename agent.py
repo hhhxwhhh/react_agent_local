@@ -127,6 +127,44 @@ def _is_evolution_task(question: str) -> bool:
     return "自进化 Harness" in text or "修改当前仓库中的自己" in text
 
 
+
+def _claims_empty_observations(answer: str) -> bool:
+    """检测答案是否声称所有工具 Observation 为空/不可见。"""
+    text = str(answer or "")
+    if not text:
+        return False
+    patterns = (
+        r"observation[^。\n]{0,20}(为空|不可见|没有返回|无返回|缺失|丢失)",
+        r"(所有|全部|每次|各个)[^。\n]{0,10}(observation|观测|工具返回)[^。\n]{0,10}(为空|不可见|没有|无)",
+        r"(观测链路|工具调用|工具返回)[^。\n]{0,10}(故障|失效|不可用|坏了)",
+        r"(没有|未|无法)(看到|获得|收到|拿到)[^。\n]{0,10}(observation|观测|工具返回|结果)",
+    )
+    lowered = text.lower()
+    for pattern in patterns:
+        if re.search(pattern, lowered, re.I):
+            return True
+    return False
+
+
+def _collect_nonempty_observations(trace: list[dict]) -> list[dict]:
+    """从轨迹中收集非空 Observation 记录。"""
+    result: list[dict] = []
+    for item in trace or []:
+        obs = str(item.get("observation", "") or "").strip()
+        if obs:
+            result.append({"step": item.get("step"), "tool": item.get("tool"), "observation": obs})
+    return result
+
+
+def _summarize_observations(records: list[dict], limit: int = 3, chars: int = 300) -> str:
+    """把真实 Observation 摘要成可注入的文本。"""
+    lines: list[str] = []
+    for rec in records[-limit:]:
+        obs = rec.get("observation", "")
+        preview = obs if len(obs) <= chars else obs[:chars] + " ...[截断]"
+        lines.append(f"- 第 {rec.get('step')} 步 {rec.get('tool')}: {preview}")
+    return "\n".join(lines)
+
 # 连续两次被判定为重复调用，或连续三次格式错误后，提前收口。
 MAX_CONSECUTIVE_DUPLICATES = 2
 MAX_CONSECUTIVE_INVALID = 3
@@ -1039,6 +1077,7 @@ class ReActAgent:
         consecutive_invalid = 0
         action_count = 0
         premature_final_rejected = False
+        observation_claim_rejected = False
         read_only_streak = 0
         stalled = False
         stall_reason = ""
@@ -1083,6 +1122,16 @@ class ReActAgent:
 
             if kind == "final":
                 answer = str(payload).strip()
+                # 轨迹一致性校验：答案声称 Observation 为空但轨迹非空时退回。
+                if (
+                    not observation_claim_rejected
+                    and _claims_empty_observations(answer)
+                    and step < self.max_steps
+                ):
+                    real_obs = _collect_nonempty_observations(self.last_trace)
+                    if real_obs:
+                        observation_claim_rejected = True
+                        summary = _summarize_observations(real_obs)
                 if (
                     _is_evolution_task(question)
                     and action_count == 0
