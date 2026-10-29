@@ -1,11 +1,11 @@
-# 注册 / 注销每天的自动自进化任务。
+# Register / unregister the daily self-evolution task.
 #
-# 用法（在项目根目录打开 PowerShell）：
+# Usage (PowerShell in the project root):
 #   powershell -ExecutionPolicy Bypass -File .\register_scheduler.ps1
 #   powershell -ExecutionPolicy Bypass -File .\register_scheduler.ps1 -Unregister
 #
-# 任务只在当前用户登录时运行；如果 12:00 时电脑关机或休眠，当天不会补跑，
-# 避免在便宜时段之外启动。
+# The task runs only while the current user is logged on. If the PC is off or
+# asleep at 12:00, the run is skipped instead of starting outside the cheap window.
 
 param(
     [switch]$Unregister
@@ -17,14 +17,14 @@ $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 if ($Unregister) {
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
-    Write-Host "已注销计划任务：$TaskName"
+    Write-Host "Unregistered scheduled task: $TaskName"
     exit 0
 }
 
 $Python = (Get-Command python -ErrorAction Stop).Source
 $Script = Join-Path $Root 'scheduler.py'
 if (-not (Test-Path $Script)) {
-    throw "找不到 $Script"
+    throw "Cannot find $Script"
 }
 $Argument = '-X utf8 "' + $Script + '" --start 12:00 --end 14:00 --max-generations 4'
 
@@ -43,9 +43,9 @@ Register-ScheduledTask `
     -Action $Action `
     -Trigger $Trigger `
     -Settings $Settings `
-    -Description '每天 12:00-14:00 逐代运行 ReAct Agent 自进化 Harness' `
+    -Description 'Run the ReAct Agent self-evolution harness daily from 12:00 to 14:00.' `
     -Force | Out-Null
 
-Write-Host "已注册计划任务：$TaskName"
-Write-Host "运行时间：每天 12:00 - 14:00（每代由 evolution.py 自行提交/回滚）"
-Write-Host "日志目录：$Root\data\evolution\scheduler"
+Write-Host "Registered scheduled task: $TaskName"
+Write-Host "Window: daily 12:00 - 14:00 (evolution.py commits or rolls back each generation)"
+Write-Host "Logs: $Root\data\evolution\scheduler"
