@@ -103,6 +103,36 @@ def _is_failure_observation(observation: str) -> bool:
     return any(marker in lowered for marker in _FAILURE_MARKERS)
 
 
+# 长轨迹采样阈值：当轨迹步数超过该值时，除尾部窗口外还从头部采样，
+# 避免 _recent_trace(limit=...) 截断后丢失早期失败样本。
+TRACE_HEAD_SAMPLE_MIN_STEPS = 40
+TRACE_HEAD_SAMPLE_SIZE = 20
+
+
+def trace_scan_window(trace: list[dict] | None) -> list[dict]:
+    """返回用于失败诊断的轨迹窗口，兼顾尾部与早期样本。
+
+    evolution.py 的 _recent_trace(limit=...) 只保留最近若干步；当轨迹很长时，
+    早期 apply_patch/write_file 的失败样本会被截掉，导致 json_truncation_failure
+    无法触发。这里在轨迹超过 TRACE_HEAD_SAMPLE_MIN_STEPS 时，额外保留头部
+    TRACE_HEAD_SAMPLE_SIZE 步，与尾部窗口合并（去重、保持原顺序）。
+    """
+    items = [item for item in (trace or []) if isinstance(item, dict)]
+    if len(items) <= TRACE_HEAD_SAMPLE_MIN_STEPS:
+        return items
+    head = items[:TRACE_HEAD_SAMPLE_SIZE]
+    tail = items[TRACE_HEAD_SAMPLE_SIZE:]
+    seen: set[int] = set()
+    merged: list[dict] = []
+    for item in head + tail:
+        key = id(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(item)
+    return merged
+
+
 def extract_tool_failures(trace: list[dict] | None) -> list[str]:
     """从真实轨迹中提取 apply_patch / write_file 的失败 Observation。
 
@@ -110,11 +140,12 @@ def extract_tool_failures(trace: list[dict] | None) -> list[str]:
     evolution.py 的 _trace_metrics 一致）。失败判定见 _is_failure_observation：
     除 "ERROR" 开头外，也识别退出码非 0、Traceback、JSON 解析报错等真实失败文本。
     返回失败信息列表，供 classify_json_truncation_failures 归类。
+
+    长轨迹会先经 trace_scan_window 采样，保留头部早期失败样本，避免被
+    _recent_trace 的 limit 截断后漏诊。
     """
     failures: list[str] = []
-    for item in trace or []:
-        if not isinstance(item, dict):
-            continue
+    for item in trace_scan_window(trace):
         if item.get("tool") not in _WRITE_TOOLS:
             continue
         observation = str(item.get("observation") or "").strip()
