@@ -1135,6 +1135,7 @@ class ReActAgent:
                 args: dict | None = None
                 parse_error = ""
                 duplicate = False
+                precheck_hit = False
                 try:
                     args = parse_action_input(raw_input, tool_name)
                 except ValueError as exc:
@@ -1194,6 +1195,7 @@ class ReActAgent:
                         )
                         if oob_reminder is not None:
                             observation = oob_reminder
+                            precheck_hit = True
                             self._emit(
                                 {
                                     "type": "note",
@@ -1260,6 +1262,7 @@ class ReActAgent:
                         "observation": observation,
                         **({"parse_error": parse_error} if parse_error else {}),
                         **({"duplicate": True} if duplicate else {}),
+                        **({"precheck": True} if precheck_hit else {}),
                     }
                 )
                 scratchpad += text + f"\nObservation: {observation}\n"
