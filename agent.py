@@ -650,6 +650,25 @@ class ReActAgent:
         )
         return f"{tool_name}:{payload}"
 
+    @staticmethod
+    def _is_git_readonly_call(tool_name: str, args: dict) -> bool:
+        """判断一次调用是否是只读 git 命令（git status / git diff 等）。
+
+        与 harness.py 的 classify_duplicate_actions_after_diff 保持同一判定口径：
+        这类命令只用于观察，重复执行不会推进任务，应拦截并注入收敛提醒。
+        """
+        if tool_name != "git":
+            return False
+        operation = str(args.get("operation") or "").strip().lower()
+        return operation in {
+            "status",
+            "diff",
+            "log",
+            "show",
+            "rev_parse",
+            "branch_list",
+        }
+
     def _summarize_text(
         self,
         task_prompt: str,
@@ -1101,12 +1120,24 @@ class ReActAgent:
                     if call_key in seen_calls:
                         duplicate = True
                         consecutive_duplicates += 1
-                        observation = (
-                            "[系统] 你刚刚已经用完全相同的参数调用过 "
-                            f"{tool_name}，结果已在上一条 Observation 中。"
-                            "请不要重复调用；请改用不同参数/工具，"
-                            "或基于已有信息直接输出 Final Answer。"
-                        )
+                        if self._is_git_readonly_call(tool_name, args):
+                            # 只读 git 命令重复：注入收敛提醒，与 harness.py 的
+                            # duplicate_actions_after_diff 诊断形成双保险。
+                            observation = (
+                                "[系统] 你刚刚已经用完全相同的参数执行过 "
+                                f"git {args.get('operation', '')}，结果已在上一条 "
+                                "Observation 中。只读 git 命令重复执行不会推进任务："
+                                "若 diff 非空，请立即用 run_tests 验证并收敛交卷；"
+                                "若 diff 为空，请先真实落盘改动再验证。"
+                                "不要为了“再确认一次”重复执行同一 git 命令。"
+                            )
+                        else:
+                            observation = (
+                                "[系统] 你刚刚已经用完全相同的参数调用过 "
+                                f"{tool_name}，结果已在上一条 Observation 中。"
+                                "请不要重复调用；请改用不同参数/工具，"
+                                "或基于已有信息直接输出 Final Answer。"
+                            )
                         self._say(_yellow("(检测到重复调用，已跳过工具执行)"))
                         self._emit(
                             {
