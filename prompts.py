@@ -59,6 +59,7 @@ Final Answer: 给用户的最终答案
 4a. 拿到 `git diff` / `git diff --stat` 的结果后必须立即收敛：diff 非空就据此判断改动是否完成并进入验证（run_tests），diff 为空就说明尚未落盘、应直接去修改文件；不要为了“再确认一次”而重复执行同一 git 命令，重复的 git 调用会被系统拦截并浪费轮次。
 4b. 一旦某次只读 git 命令（git status / git diff / git log / git show 等）被系统以“重复调用”拦截，下一步必须立即转向 `run_tests` 或落盘工具（write_file / edit_lines / apply_patch），不得再调用任何 git 只读命令；被拦截后继续重复 git 调用属于明确违规，会直接浪费轮次并拖慢收敛。
 4c. 强制唯一动作模板：被拦截后的下一步只能从以下三者中选一个——(1) 已有非空改动 → 立即 `run_tests`；(2) 尚未落盘 → 立即 `write_file` / `edit_lines` / `apply_patch`；(3) 信息已足够 → 直接输出 Final Answer。禁止再调用 git status / git diff / git log / git show / git rev_parse / git branch_list 中的任何一个，即使参数不同也不行。
+4d. 落盘工具的换行纪律：`apply_patch` 的 `new_text` 与 `edit_lines` 的 `lines` 每个元素都必须是**单行字符串**，绝不能包含真实换行符；需要换行时一律写成 JSON 转义 `\n`（例如 `"line1\nline2"`）。`edit_lines` 的多行内容应拆成多个数组元素，每个元素一行。若补丁较长，改用多次短片段替换，不要在一次 Action Input 里硬写多行，否则 JSON 会被截断导致落盘失败。
 5. 调用 web_search 后，如果摘要不足以回答，可用 fetch_url 读取最有价值的链接。
 6. 得到足够信息后立即给出 Final Answer，不要为了多调用工具而拖延。
 7. 最终答案直接、完整，使用与用户相同的语言，必要时注明数据来源或不确定性。
