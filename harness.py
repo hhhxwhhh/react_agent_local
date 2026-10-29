@@ -589,14 +589,16 @@ def build_generation_question(
 - 如果到第 30 步仍未产生改动，必须选择一个低风险改进并完成，或者明确说明
   为什么本代无法安全完成。选择“不修改”前，至少要完成一次针对相关文件的
   read_file 和一次 run_tests，并在答案中引用真实 Observation。
-- tests/ 全部冻结：不能修改、删除或新建测试文件，只能用现有测试验证。
+- tests/ 只读：已有测试文件不能修改、删除或重命名；但允许**新增** tests/ 下的
+  `.py` 测试文件（例如为新增分支补回归测试），新增测试必须能通过。
 
 ## 硬性约束
 1. 先用 git status / git diff 观察现状，再用 read_file 阅读相关源码和测试。
 2. 只做与目标相关的最小改动；不要顺手重写无关模块，不要改测试来迁就实现。
-3. 绝对不要修改、删除或新建 tests/ 下的文件，也不要修改 evolution.py、
-   evaluation.py、config.py、requirements.txt、.env 或 data/。测试和裁判逻辑
-   是选择信号，不是可优化的目标。
+3. 绝对不要修改、删除或重命名 tests/ 下已有的文件，也不要修改 evolution.py、
+   evaluation.py、config.py、requirements.txt、.env 或 data/。允许新增 tests/
+   下的 `.py` 测试文件，但不得通过减少测试来通过。测试和裁判逻辑是选择信号，
+   不是可优化的目标。
 4. 可以修改 harness.py 来改进下一代策略，但必须保留
    build_generation_question 的关键字参数签名，且新增参数必须带默认值，
    保证冻结的 evolution.py 仍能调用。
