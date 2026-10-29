@@ -181,6 +181,14 @@ def _run_generation(log) -> int:
     ]
     env = dict(os.environ)
     env["PYTHONIOENCODING"] = "utf-8"
+    # 计划任务的 PATH 可能比交互式终端短；显式补上当前解释器目录，
+    # 保证测试里的 run_command("python ...") 和执行器本身都能被找到。
+    python_dir = Path(sys.executable).resolve().parent
+    path_parts = [str(python_dir)]
+    scripts_dir = python_dir / "Scripts"
+    if scripts_dir.is_dir():
+        path_parts.append(str(scripts_dir))
+    env["PATH"] = os.pathsep.join(path_parts + [env.get("PATH", "")])
     _log(log, "启动一代：" + " ".join(cmd[3:]))
     proc = subprocess.Popen(
         cmd,

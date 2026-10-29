@@ -2570,10 +2570,50 @@ def search_files(
 # ---------------------------------------------------------------------------
 
 
+def _git_bash_candidates() -> list[Path]:
+    """列出常见的 Git Bash 安装位置，避免依赖 PATH。"""
+    candidates: list[Path] = []
+    for env_name in (
+        "ProgramFiles",
+        "ProgramW6432",
+        "ProgramFiles(x86)",
+        "LOCALAPPDATA",
+    ):
+        base = os.environ.get(env_name)
+        if not base:
+            continue
+        root = Path(base) / "Git"
+        candidates.append(root / "bin" / "bash.exe")
+        candidates.append(root / "usr" / "bin" / "bash.exe")
+        if env_name == "LOCALAPPDATA":
+            candidates.append(Path(base) / "Programs" / "Git" / "bin" / "bash.exe")
+    git = shutil.which("git")
+    if git:
+        candidates.append(Path(git).resolve().parent.parent / "bin" / "bash.exe")
+    return candidates
+
+
+def _find_git_bash() -> str | None:
+    """优先返回 Git Bash；排除 System32 下会拉起 WSL 的 bash.exe。"""
+    for candidate in _git_bash_candidates():
+        try:
+            if candidate.is_file():
+                return str(candidate)
+        except OSError:
+            continue
+    bash = shutil.which("bash")
+    if not bash:
+        return None
+    parts = {part.lower() for part in Path(bash).parts}
+    if "system32" in parts or "sysnative" in parts:
+        return None
+    return bash
+
+
 def _shell_argv(command: str) -> list[str]:
     """选择本机 shell：Windows 优先 Git Bash，其次 PowerShell；POSIX 用 sh。"""
     if os.name == "nt":
-        bash = shutil.which("bash")
+        bash = _find_git_bash()
         if bash:
             return [bash, "-lc", command]
         return ["powershell", "-NoProfile", "-NonInteractive", "-Command", command]

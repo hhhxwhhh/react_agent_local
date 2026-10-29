@@ -437,6 +437,26 @@ class TestFileTools(unittest.TestCase):
         self.assertIn("permission-ok", result)
         self.assertIn("退出码：0", result)
 
+    @unittest.skipUnless(sys.platform == "win32", "Windows only")
+    def test_shell_argv_skips_wsl_bash(self):
+        with patch.object(tools, "_git_bash_candidates", return_value=[]), patch.object(
+            tools.shutil, "which", return_value=r"C:\Windows\System32\bash.exe"
+        ):
+            argv = tools._shell_argv("echo hi")
+        self.assertEqual(
+            argv,
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", "echo hi"],
+        )
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows only")
+    def test_shell_argv_prefers_git_bash(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fake = Path(temp_dir) / "bash.exe"
+            fake.write_text("", encoding="utf-8")
+            with patch.object(tools, "_git_bash_candidates", return_value=[fake]):
+                argv = tools._shell_argv("echo hi")
+        self.assertEqual(argv, [str(fake), "-lc", "echo hi"])
+
     def test_run_command_executes_python_code_without_prompt(self):
         self.directory.mkdir(parents=True, exist_ok=True)
         prompts: list[dict] = []
