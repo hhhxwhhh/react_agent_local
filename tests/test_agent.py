@@ -35,6 +35,7 @@ from tools import (  # noqa: E402
     date_calc,
     delete_file,
     edit_file,
+    edit_lines,
     get_current_time,
     git,
     list_files,
@@ -161,7 +162,7 @@ class TestTools(unittest.TestCase):
         self.assertIn("未知工具", result)
 
         # 内部实现可以保留，但不能重新进入 Agent 的动作空间。
-        self.assertEqual(len(tools.TOOL_SPECS), 15)
+        self.assertEqual(len(tools.TOOL_SPECS), 16)
         self.assertFalse(tools.INTERNAL_ONLY_TOOLS & set(tools.TOOL_SPECS))
         self.assertFalse(tools.INTERNAL_ONLY_TOOLS & set(tools.TOOL_FUNCS))
         for removed in tools.INTERNAL_ONLY_TOOLS:
@@ -305,6 +306,27 @@ class TestFileTools(unittest.TestCase):
         write_file(f"{self.folder}/log.txt", "A")
         write_file(f"{self.folder}/log.txt", "B", append=True)
         self.assertIn("AB", read_file(f"{self.folder}/log.txt"))
+
+    def test_edit_lines_overwrite_insert_and_replace(self):
+        path = f"{self.folder}/edit_lines.txt"
+
+        def body() -> list[str]:
+            text = read_file(path)
+            return text.split("\n\n", 1)[1].splitlines()
+
+        message = edit_lines(path, ["alpha", "beta", "gamma"])
+        self.assertIn("已按行覆盖", message)
+        self.assertEqual(body(), ["alpha", "beta", "gamma"])
+
+        edit_lines(path, ["between"], start_line=1)
+        self.assertEqual(body(), ["alpha", "between", "beta", "gamma"])
+
+        edit_lines(path, ["BETA", "GAMMA"], start_line=3, end_line=4)
+        self.assertEqual(body(), ["alpha", "between", "BETA", "GAMMA"])
+
+    def test_edit_lines_rejects_embedded_newlines(self):
+        with self.assertRaises(ValueError):
+            edit_lines(f"{self.folder}/bad.txt", ["a\nb"])
 
     def test_read_file_line_range(self):
         path = f"{self.folder}/lines.txt"

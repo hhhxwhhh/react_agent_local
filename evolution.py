@@ -373,8 +373,29 @@ def is_destructive_command(command: str) -> bool:
     return any(re.search(pattern, text, re.I) for pattern in _DESTRUCTIVE_PATTERNS)
 
 
-def find_path_violations(paths: list[str]) -> list[str]:
-    """返回触碰冻结边界的路径说明。"""
+def _path_in_commit(commit: str, path: str) -> bool:
+    """判断某个路径在基线提交中是否已存在；无法确认时按“已存在”保守处理。"""
+    if not commit:
+        return True
+    try:
+        proc = subprocess.run(
+            ["git", "cat-file", "-e", f"{commit}:{path}"],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return True
+    return proc.returncode == 0
+
+
+def find_path_violations(paths: list[str], baseline: str | None = None) -> list[str]:
+    """返回触碰冻结边界的路径说明。
+
+    `tests/` 下的已有文件仍属于冻结边界；但如果路径在基线提交中不存在，
+    说明是新增测试文件，允许写入，便于 Agent 为自己的改动补回归测试。
+    """
     violations: list[str] = []
     for raw in paths:
         path = str(raw or "").replace("\\", "/").strip()
@@ -389,6 +410,11 @@ def find_path_violations(paths: list[str]) -> list[str]:
             continue
         normalized = "/".join(parts)
         if normalized in PROTECTED_EXACT or normalized in PROTECTED_DIR_NAMES:
+            violations.append(f"{normalized}：属于冻结边界")
+            continue
+        if normalized.startswith("tests/"):
+            if baseline and not _path_in_commit(baseline, normalized):
+                continue
             violations.append(f"{normalized}：属于冻结边界")
             continue
         if any(normalized.startswith(prefix) for prefix in PROTECTED_PREFIXES):
@@ -865,7 +891,7 @@ def _bigram_overlap(a: str, b: str) -> float:
 # 每代结束后把轨迹压成指标、归因到具体组件，再把“改了什么、是否有效、
 # 在什么条件下可复用”写入 experience.jsonl，供后续几代选目标和写提示时参考。
 
-_WRITE_TOOLS = {"write_file", "edit_file", "apply_patch"}
+_WRITE_TOOLS = {"write_file", "edit_lines", "edit_file", "apply_patch"}
 _COMPONENT_FILES: dict[str, tuple[str, ...]] = {
     "prompts": ("prompts.py",),
     "agent_loop": ("agent.py",),
@@ -1552,6 +1578,32 @@ def _auto_objective() -> tuple[str, dict[str, Any]]:
     return chosen, info
 
 
+def _recent_trace(limit: int = 400) -> list[dict[str, Any]]:
+    """读取最近一代的轨迹，供下一代提示词分析工具层失败。"""
+    try:
+        files = sorted(GENERATION_LOG_DIR.glob("gen-*.trace.jsonl"))
+    except OSError:
+        return []
+    if not files:
+        return []
+    items: list[dict[str, Any]] = []
+    try:
+        lines = files[-1].read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            item = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(item, dict):
+            items.append(item)
+    return items[-max(1, int(limit)) :]
+
+
 def _generation_history(limit: int = 6) -> str:
     """把最近 accepted/rejected 记录压缩成可注入提示词的历史摘要。"""
     entries = [
@@ -2012,6 +2064,7 @@ def run_single_generation(args: argparse.Namespace) -> int:
             + [prefix.rstrip("/") for prefix in PROTECTED_PREFIXES],
             history=history_text,
             experience=experience_text,
+            trace=_recent_trace(),
         )
         permission_log: list[dict[str, Any]] = record["agent"]["permissions"]
         log_path = GENERATION_LOG_DIR / f"gen-{generation:03d}.log"
@@ -2110,7 +2163,7 @@ def run_single_generation(args: argparse.Namespace) -> int:
             )
             return 0
 
-        violations = find_path_violations(paths)
+        violations = find_path_violations(paths, baseline=baseline_commit)
         diff_lines, binary_violations = _count_diff_lines(ROOT, baseline_commit)
         record["candidate"]["diff_lines"] = diff_lines
         if violations or binary_violations:

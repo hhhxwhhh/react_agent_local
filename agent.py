@@ -52,6 +52,7 @@ STOP_SEQUENCES = ["Observation:", "Observation："]
 # 这些工具会改变外部状态；调用后清空“已见调用”，允许模型重新读取变化后的结果。
 STATE_CHANGING_TOOLS = {
     "write_file",
+    "edit_lines",
     "apply_patch",
     "run_command",
     "run_tests",
@@ -61,6 +62,7 @@ STATE_CHANGING_TOOLS = {
 # 只有这些工具算“真正推进了修改”；run_command/git 常被用于探索，不能算收敛。
 WRITE_TOOLS = {
     "write_file",
+    "edit_lines",
     "apply_patch",
     "edit_file",
     "move_file",

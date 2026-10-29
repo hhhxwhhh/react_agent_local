@@ -17,6 +17,44 @@ import harness  # noqa: E402
 
 
 class TestEvolutionHelpers(unittest.TestCase):
+    def test_allows_new_test_files_only(self):
+        with patch.object(
+            evolution,
+            "_path_in_commit",
+            side_effect=lambda commit, path: path == "tests/test_agent.py",
+        ):
+            self.assertEqual(
+                evolution.find_path_violations(
+                    ["tests/test_new_feature.py"], baseline="abc1234"
+                ),
+                [],
+            )
+            self.assertTrue(
+                evolution.find_path_violations(
+                    ["tests/test_agent.py"], baseline="abc1234"
+                )
+            )
+        # 没有基线时保持保守：tests/ 仍然整体冻结。
+        self.assertTrue(evolution.find_path_violations(["tests/test_new_feature.py"]))
+
+    def test_recent_trace_reads_last_generation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            (folder / "gen-001.trace.jsonl").write_text(
+                json.dumps({"tool": "read_file", "observation": "旧轨迹"}) + "\n",
+                encoding="utf-8",
+            )
+            (folder / "gen-002.trace.jsonl").write_text(
+                json.dumps({"tool": "apply_patch", "observation": "ERROR 截断"})
+                + "\n"
+                + "not json\n",
+                encoding="utf-8",
+            )
+            with patch.object(evolution, "GENERATION_LOG_DIR", folder):
+                trace = evolution._recent_trace()
+        self.assertEqual(len(trace), 1)
+        self.assertEqual(trace[0]["tool"], "apply_patch")
+
     def test_protected_paths(self):
         self.assertEqual(evolution.find_path_violations([]), [])
         self.assertEqual(

@@ -2273,6 +2273,100 @@ def edit_file(
     )
 
 
+def edit_lines(
+    path: str,
+    lines: list[str],
+    start_line: int = 0,
+    end_line: int = 0,
+    *,
+    context: ToolContext | None = None,
+) -> str:
+    """按行号编辑文件；每行单独放在数组里，避免 JSON 中出现裸换行。
+
+    - start_line=0：整体覆盖（新建或清空重写）
+    - start_line>=1 且 end_line=0：在第 start_line 行之后插入
+    - start_line>=1 且 end_line>=start_line：替换该闭区间
+    """
+    target = _resolve_path(path)
+    _ensure_writable_target(target)
+    if target.exists() and target.is_dir():
+        raise ValueError("目标是目录，不能编辑")
+    if not isinstance(lines, list):
+        raise ValueError("lines 必须是字符串数组")
+    new_lines = [str(item) for item in lines]
+    if any("\n" in item or "\r" in item for item in new_lines):
+        raise ValueError("lines 的每个元素必须单行；多行内容请拆成多个数组元素")
+    start = int(start_line or 0)
+    end = int(end_line or 0)
+    if start < 0 or end < 0:
+        raise ValueError("行号必须是非负整数")
+
+    exists = target.exists()
+    if exists:
+        text = _read_text_file(target)
+        newline = _detect_newline(text)
+        original = _normalize_newlines(text)
+        had_trailing = original.endswith("\n")
+        body = original[:-1] if had_trailing else original
+        original_lines = body.split("\n") if body else []
+    else:
+        if start != 0 or end != 0:
+            raise ValueError("文件不存在时只能用 start_line=0 整体创建")
+        newline = "\n"
+        original_lines = []
+        had_trailing = True
+
+    total = len(original_lines)
+    if start == 0:
+        if end != 0:
+            raise ValueError("整体覆盖时 end_line 必须为 0")
+        mode = "覆盖"
+        updated_lines = list(new_lines)
+    elif end == 0:
+        if start > total:
+            raise ValueError(f"插入位置 {start} 超出文件行数 {total}")
+        if not new_lines:
+            raise ValueError("插入内容不能为空")
+        mode = "插入"
+        updated_lines = original_lines[:start] + new_lines + original_lines[start:]
+    else:
+        if start > total or end > total:
+            raise ValueError(f"替换区间 {start}-{end} 超出文件行数 {total}")
+        if end < start:
+            raise ValueError("end_line 必须大于等于 start_line，或为 0 表示插入")
+        mode = "替换"
+        updated_lines = original_lines[: start - 1] + new_lines + original_lines[end:]
+
+    text_out = newline.join(updated_lines)
+    if updated_lines and had_trailing:
+        text_out += newline
+    if len(text_out) > MAX_WRITE_CHARS:
+        raise ValueError(f"写入内容过长（上限 {MAX_WRITE_CHARS} 字符）")
+
+    _request_permission(
+        context,
+        tool="edit_lines",
+        title="按行编辑权限",
+        detail=(
+            f"Agent 想按行{mode}文件：\n{target}\n"
+            f"起始行 {start}，结束行 {end}，写入 {len(new_lines)} 行"
+        ),
+        action="edit",
+        path=str(target),
+        start_line=start,
+        end_line=end,
+        line_count=len(new_lines),
+    )
+
+    _atomic_write_text(target, text_out)
+    _forget_read_history(target)
+    return (
+        f"已按行{mode}：{_display_path(target)}"
+        f"（起始行 {start}，结束行 {end}，写入 {len(new_lines)} 行，"
+        f"文件共 {len(updated_lines)} 行 / {target.stat().st_size} 字节）"
+    )
+
+
 def _atomic_write_text(target: Path, text: str) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(
@@ -3268,6 +3362,30 @@ TOOL_SPECS: dict[str, dict] = {
         },
         "context": True,
     },
+    "edit_lines": {
+        "description": "按行号修改文件，专为多行内容设计：把每一行作为独立的 lines 元素传入，JSON 里不含裸换行，避免 Action Input 被截断。start_line=0 时整体覆盖；start_line>=1 且 end_line=0 时在第 start_line 行之后插入；end_line>=start_line 时替换闭区间。修改前应先 read_file 确认行号。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "文件路径"},
+                "lines": {
+                    "type": "array",
+                    "description": "要写入的行；每个元素必须是不含换行的单行字符串",
+                    "items": {"type": "string"},
+                },
+                "start_line": {
+                    "type": "integer",
+                    "description": "起始行号（1-based）；0 表示整体覆盖",
+                },
+                "end_line": {
+                    "type": "integer",
+                    "description": "结束行号（含）；0 表示插入到 start_line 之后",
+                },
+            },
+            "required": ["path", "lines"],
+        },
+        "context": True,
+    },
     "search_files": {
         "description": "在本机目录中搜索文件：可按路径/文件名和文本内容匹配关键词。path 可为绝对路径；相对路径以项目根目录为基准。",
         "parameters": {
@@ -3453,6 +3571,7 @@ TOOL_FUNCS: dict[str, Callable[..., str]] = {
     "list_files": list_files,
     "read_file": read_file,
     "write_file": write_file,
+    "edit_lines": edit_lines,
     "search_files": search_files,
     "apply_patch": apply_patch,
     "run_tests": run_tests,
