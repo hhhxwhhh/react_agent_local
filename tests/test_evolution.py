@@ -279,6 +279,17 @@ class TestEvolutionHelpers(unittest.TestCase):
             )
         )
         self.assertFalse(evolution._declares_incomplete("180 项测试全部通过"))
+        # 冒号后换行再列 `- 文件` 是正常清单，不是“无改动”（第 49 代误拒）。
+        self.assertFalse(
+            evolution._declares_incomplete(
+                "- 改动文件：\n  - 新增 `tests/test_x.py`（4 个用例）\n"
+                "- 核心改动：新增回归测试"
+            )
+        )
+        # 真正的半成品自评必须拦住（第 46/47 代）。
+        self.assertTrue(evolution._declares_incomplete("当前代码处于语法不完整状态"))
+        self.assertTrue(evolution._declares_incomplete("本代改动是部分完成"))
+        self.assertTrue(evolution._declares_incomplete("注入主体尚未成功落盘"))
 
     def test_diagnose_incomplete_declared(self):
         record = {
