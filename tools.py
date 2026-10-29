@@ -207,6 +207,25 @@ def _reset_read_skip_streak(session_id: str | None = None) -> None:
     _READ_SKIP_STREAK.pop(session_id, None)
 
 
+# 连续越界读取计数：read_file 请求 start_line 超过文件总行数时 +1，
+# 成功读取时清零。达到阈值后在错误信息中追加收敛提醒，
+# 引导模型改用 search_files 定位行号，打断 blind_read_loop。
+# 按 (session_id, 文件路径) 计数：不同文件互不干扰。
+_READ_OOB_STREAK: dict[tuple[str | None, str], int] = {}
+READ_OOB_STREAK_LIMIT = 2
+
+
+def _bump_read_oob_streak(key: tuple[str | None, str]) -> int:
+    """记录一次越界读取，返回累计次数。"""
+    _READ_OOB_STREAK[key] = _READ_OOB_STREAK.get(key, 0) + 1
+    return _READ_OOB_STREAK[key]
+
+
+def _reset_read_oob_streak(key: tuple[str | None, str]) -> None:
+    """成功读取后清零该文件的连续越界计数。"""
+    _READ_OOB_STREAK.pop(key, None)
+
+
 def _read_skip_notice(
     key: tuple[str | None, str], first: int, last: int
 ) -> str:
@@ -2080,8 +2099,27 @@ def read_file(
         key = None
         first = last = 0
 
-    result = _read_file_impl(path, max_chars, start_line, end_line)
+    try:
+        result = _read_file_impl(path, max_chars, start_line, end_line)
+    except ValueError as exc:
+        # 越界读取（start_line 超过文件总行数）是 blind_read_loop 的典型信号：
+        # 模型在不知道文件规模时反复请求越界区间。这里按 session+文件累计
+        # 越界次数，达到阈值时在错误信息中追加收敛提醒，引导改用 search_files。
+        msg = str(exc)
+        if "超过文件总行数" in msg and key is not None:
+            streak = _bump_read_oob_streak(key)
+            if streak >= READ_OOB_STREAK_LIMIT:
+                msg += (
+                    "\n\n[系统提醒] 你已连续 "
+                    f"{streak} 次请求超出文件行数的区间。请停止猜测行号："
+                    "先用 search_files（search_content=true）定位目标行号，"
+                    "或先不带 start_line/end_line 读取文件头部确认总行数，"
+                    "再定向读取必要区间。"
+                )
+        raise ValueError(msg) from exc
     _reset_read_skip_streak(session_id)
+    if key is not None:
+        _reset_read_oob_streak(key)
     try:
         if key is not None:
             # 记录区间时把“开放末尾”哨兵替换为实际文件行数，避免
