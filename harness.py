@@ -236,8 +236,12 @@ def classify_duplicate_actions_after_diff(trace: list[dict] | None) -> dict:
         advice = (
             "本代出现 %d 次“拿到非空 diff 后仍重复 git 只读调用”。正确收敛路径是："
             "git diff 显示非空改动 → 立即 run_tests 验证 → 收敛交卷，不要为了“再确认"
-            "一次”重复执行同一 git 命令。下一代应在重复调用检测中对 git diff / "
-            "git status 这类只读命令做“同参数重复即拦截并注入收敛提醒”。" % hits
+            "一次”重复执行同一 git 命令。注意：agent.py 已在重复调用检测中对 git "
+            "diff / git status 这类只读命令做“同参数重复即拦截并注入收敛提醒”"
+            "（第 34/42 代已落地），因此本类别命中说明拦截后模型仍未转向 run_tests，"
+            "下一代应优先排查拦截提醒的措辞与位置，或结合 "
+            "convergence_after_duplicate_block 诊断量化转向率，而不是重复实现拦截。"
+            % hits
         )
     return {"count": hits, "category": category, "advice": advice}
 
