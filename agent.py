@@ -16,7 +16,6 @@ import argparse
 import json
 import os
 import re
-import subprocess
 import sys
 from threading import Event
 from typing import Callable
@@ -124,27 +123,6 @@ def _is_evolution_task(question: str) -> bool:
     """识别自进化任务：这类任务必须先实际探索，不能零工具调用直接交卷。"""
     text = str(question or "")
     return "自进化 Harness" in text or "修改当前仓库中的自己" in text
-
-
-def _git_diff_stat_nonempty() -> bool:
-    """检查工作区是否有非空改动（git diff --stat 非空）。"""
-    try:
-        proc = subprocess.run(
-            ["git", "diff", "--stat"],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-    except Exception:
-        return False
-    return bool((proc.stdout or "").strip())
-
-
-def _answer_claims_file_change(answer: str) -> bool:
-    """判断 Final Answer 是否声称改动了文件。"""
-    text = str(answer or "")
-    markers = ("改动文件", "已修改", "已落盘", "已写入", "修改了", "新增了", "已改动")
-    return any(m in text for m in markers)
 
 
 # 连续两次被判定为重复调用，或连续三次格式错误后，提前收口。
@@ -992,7 +970,6 @@ class ReActAgent:
         consecutive_invalid = 0
         action_count = 0
         premature_final_rejected = False
-        landed_change_rejected = False
         read_only_streak = 0
         stalled = False
         stall_reason = ""
