@@ -34,6 +34,16 @@ class TestEvolutionHelpers(unittest.TestCase):
                     ["tests/test_agent.py"], baseline="abc1234"
                 )
             )
+            junk = evolution.find_path_violations(
+                ["testlog.txt"], baseline="abc1234"
+            )
+            self.assertTrue(junk)
+            self.assertIn("临时产物", junk[0])
+            self.assertTrue(
+                evolution.find_path_violations(
+                    ["tests/notes.txt"], baseline="abc1234"
+                )
+            )
         # 没有基线时保持保守：tests/ 仍然整体冻结。
         self.assertTrue(evolution.find_path_violations(["tests/test_new_feature.py"]))
 

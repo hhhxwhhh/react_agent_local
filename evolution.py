@@ -390,6 +390,9 @@ def _path_in_commit(commit: str, path: str) -> bool:
     return proc.returncode == 0
 
 
+_JUNK_SUFFIXES = {".txt", ".log", ".tmp", ".bak", ".out", ".err"}
+
+
 def find_path_violations(paths: list[str], baseline: str | None = None) -> list[str]:
     """返回触碰冻结边界的路径说明。
 
@@ -414,8 +417,18 @@ def find_path_violations(paths: list[str], baseline: str | None = None) -> list[
             continue
         if normalized.startswith("tests/"):
             if baseline and not _path_in_commit(baseline, normalized):
+                if Path(normalized).suffix.lower() in _JUNK_SUFFIXES:
+                    violations.append(f"{normalized}：测试目录只允许新增 .py 测试文件")
+                    continue
                 continue
             violations.append(f"{normalized}：属于冻结边界")
+            continue
+        if (
+            baseline
+            and not _path_in_commit(baseline, normalized)
+            and Path(normalized).suffix.lower() in _JUNK_SUFFIXES
+        ):
+            violations.append(f"{normalized}：临时产物，不允许提交")
             continue
         if any(normalized.startswith(prefix) for prefix in PROTECTED_PREFIXES):
             violations.append(f"{normalized}：属于冻结边界")
@@ -1291,6 +1304,7 @@ def _diagnose_generation(record: dict[str, Any]) -> dict[str, Any]:
             ("Agent 运行失败", "agent_error"),
             ("用户中断", "user_interrupt"),
             ("自评本代未完成", "incomplete_declared"),
+            ("临时产物", "junk_artifact"),
         )
         for needle, mode in checks:
             if needle in reason and mode not in modes:
