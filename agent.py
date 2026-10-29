@@ -651,6 +651,40 @@ class ReActAgent:
         return f"{tool_name}:{payload}"
 
     @staticmethod
+    def _precheck_read_file_bounds(tool_name: str, args: dict) -> str | None:
+        """循环层预检：read_file 的 start_line 是否超过文件总行数。
+
+        与 tools.py 的越界兜底形成双保险：tools.py 在第二次越界时才追加
+        [系统提醒]，这里在首次越界就注入收敛提醒，避免模型反复盲读大文件。
+        返回提醒文本；无需提醒时返回 None。
+        """
+        if tool_name != "read_file":
+            return None
+        start_line = args.get("start_line")
+        if not isinstance(start_line, int) or start_line <= 0:
+            return None
+        path = args.get("path")
+        if not isinstance(path, str) or not path:
+            return None
+        try:
+            if not os.path.isfile(path):
+                return None
+            with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                total_lines = sum(1 for _ in handle)
+        except OSError:
+            return None
+        if start_line <= total_lines:
+            return None
+        return (
+            "[系统提醒] 你请求的 start_line="
+            f"{start_line} 已超过文件总行数（{total_lines} 行），"
+            "本次读取必然越界。请立即停止盲目逐段读取："
+            "先用 search_files（search_content=true）定位关键词行号，"
+            "再用 start_line/end_line 定向读取必要区间；"
+            "或直接基于已有 Observation 输出 Final Answer。"
+        )
+
+    @staticmethod
     def _is_git_readonly_call(tool_name: str, args: dict) -> bool:
         """判断一次调用是否是只读 git 命令（git status / git diff 等）。
 
@@ -1153,9 +1187,24 @@ class ReActAgent:
                             seen_calls.clear()
                         seen_calls.add(call_key)
                         consecutive_duplicates = 0
-                        observation = run_tool(
-                            tool_name, args, context=self.tool_context
+                        # 循环层预检：read_file 首次越界即注入收敛提醒，
+                        # 与 tools.py 的越界兜底形成双保险。
+                        oob_reminder = self._precheck_read_file_bounds(
+                            tool_name, args
                         )
+                        if oob_reminder is not None:
+                            observation = oob_reminder
+                            self._emit(
+                                {
+                                    "type": "note",
+                                    "step": step,
+                                    "text": "read_file 预检越界，已注入收敛提醒",
+                                }
+                            )
+                        else:
+                            observation = run_tool(
+                                tool_name, args, context=self.tool_context
+                            )
                         # 工具层硬跳过与循环层联动：连续多次被硬跳过时，
                         # 直接注入系统消息，强制模型改用 search_files 定位。
                         # 与 tools.py 中 read_file 的计数 key 保持一致：
