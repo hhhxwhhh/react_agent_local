@@ -26,7 +26,7 @@ $Script = Join-Path $Root 'scheduler.py'
 if (-not (Test-Path $Script)) {
     throw "Cannot find $Script"
 }
-$Argument = '-X utf8 "' + $Script + '" --start 12:00 --end 14:00 --max-generations 4'
+$Argument = '-X utf8 "' + $Script + '" --start 12:00 --end 14:00 --max-generations 6'
 
 $Action = New-ScheduledTaskAction `
     -Execute $Python `
