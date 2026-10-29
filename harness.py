@@ -159,15 +159,20 @@ def extract_tool_failures(trace: list[dict] | None) -> list[str]:
 # git status / git diff 等只读命令，说明模型没有收敛，归入 duplicate_actions 子类。
 DUPLICATE_ACTIONS_AFTER_DIFF = "duplicate_actions_after_diff"
 
-# 视为“只读 git 命令”的工具名与命令前缀。
+# 视为“只读 git 命令”的工具名与 operation 集合。
+# 与 agent.py 的 ReActAgent._is_git_readonly_call 保持同一判定口径：
+# 按 operation 精确匹配，而不是对整段 input 做子串前缀匹配，避免把
+# `git commit -m "fix status"` 这类非只读命令误判为只读。
 _GIT_READONLY_TOOLS = ("git",)
-_GIT_READONLY_PREFIXES = (
-    "git status",
-    "git diff",
-    "git log",
-    "git show",
-    "git rev-parse",
-    "git branch",
+_GIT_READONLY_OPERATIONS = frozenset(
+    {
+        "status",
+        "diff",
+        "log",
+        "show",
+        "rev_parse",
+        "branch_list",
+    }
 )
 
 # 非空 diff 的判定标记：git diff --stat 有统计行、git diff 有 +/- 行。
@@ -180,12 +185,10 @@ def _is_git_readonly_step(item: dict) -> bool:
     if tool not in _GIT_READONLY_TOOLS:
         return False
     raw_input = item.get("input")
-    if isinstance(raw_input, dict):
-        text = " ".join(str(v) for v in raw_input.values())
-    else:
-        text = str(raw_input or "")
-    lowered = text.lower()
-    return any(prefix in lowered for prefix in _GIT_READONLY_PREFIXES)
+    if not isinstance(raw_input, dict):
+        return False
+    operation = str(raw_input.get("operation") or "").strip().lower()
+    return operation in _GIT_READONLY_OPERATIONS
 
 
 def _observation_has_nonempty_diff(observation: str) -> bool:
