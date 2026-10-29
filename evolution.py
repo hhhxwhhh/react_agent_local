@@ -950,6 +950,7 @@ _FAILURE_KEYWORDS: dict[str, tuple[str, ...]] = {
         "调用过工具",
         "action_count",
     ),
+    "incomplete_declared": ("未完成", "半成品", "自评", "无有效改动"),
     "blind_read_loop": ("read_file", "读取", "search_files", "行号", "盲读"),
     "duplicate_actions": ("重复", "同一命令", "原样重复"),
     "test_failure": ("测试失败", "回归测试"),
@@ -1135,6 +1136,26 @@ def _claims_edit(answer: str) -> bool:
     )
 
 
+_INCOMPLETE_DECLARATION_PATTERNS = (
+    r"改动文件\s*[：:]\s*(?:无|没有|—|-)",
+    r"无有效(?:落盘)?改动",
+    r"属于失败迭代",
+    r"本代不满足完成标准",
+    r"核心改动\s*[：:]\s*(?:无|没有)",
+)
+
+
+def _declares_incomplete(answer: str) -> bool:
+    """判断最终答案是否自评“本代没做完/没有有效改动”。
+
+    第 26 代的答案明确写了“改动文件：无”“无有效落盘改动”“属于失败迭代”，
+    但工作区里留下了半成品代码，Harness 仍按 diff 判为接受。出现这种
+    “自评未完成却存在改动”的矛盾时，应拒绝而不是提交半成品。
+    """
+    value = str(answer or "")
+    return any(re.search(pattern, value) for pattern in _INCOMPLETE_DECLARATION_PATTERNS)
+
+
 _OBSERVATION_FAILURE_PATTERNS = (
     r"Observation[^\n。；]{0,40}(?:完全不可见|不可见|为空|返回空)",
     r"观测链路[^\n。；]{0,20}(?:失效|不可用|中断|故障)",
@@ -1243,6 +1264,7 @@ def _diagnose_generation(record: dict[str, Any]) -> dict[str, Any]:
             (".env", "env_modified"),
             ("Agent 运行失败", "agent_error"),
             ("用户中断", "user_interrupt"),
+            ("自评本代未完成", "incomplete_declared"),
         )
         for needle, mode in checks:
             if needle in reason and mode not in modes:
@@ -2075,6 +2097,17 @@ def run_single_generation(args: argparse.Namespace) -> int:
             record["decision"] = "rejected"
             record["reason"] = "Agent 没有产生任何改动"
             print("[harness] 本代没有改动，拒绝。")
+            return 0
+
+        final_answer = str(record["agent"].get("final_answer") or "")
+        if _declares_incomplete(final_answer):
+            _reject(
+                root=ROOT,
+                baseline=baseline_commit,
+                generation=generation,
+                record=record,
+                reason="Agent 自评本代未完成；不接受矛盾或半成品改动",
+            )
             return 0
 
         violations = find_path_violations(paths)

@@ -215,6 +215,45 @@ class TestEvolutionHelpers(unittest.TestCase):
         self.assertIn("claimed_without_edit", diagnosis["failure_modes"])
         self.assertEqual(diagnosis["component"], "agent_loop")
 
+    def test_declares_incomplete_detects_self_reported_failure(self):
+        answer = (
+            "- 改动文件：无（`agent.py` 已用 `git restore` 恢复）\n"
+            "- 核心改动：无有效落盘改动\n"
+            "- 本代属于失败迭代。"
+        )
+        self.assertTrue(evolution._declares_incomplete(answer))
+        self.assertTrue(evolution._declares_incomplete("本代不满足完成标准"))
+        self.assertFalse(
+            evolution._declares_incomplete(
+                "- 改动文件：`agent.py`\n- 核心改动：新增落盘校验"
+            )
+        )
+        self.assertFalse(evolution._declares_incomplete("180 项测试全部通过"))
+
+    def test_diagnose_incomplete_declared(self):
+        record = {
+            "generation": 26,
+            "decision": "rejected",
+            "objective": "在 Final Answer 处理中加入落盘校验",
+            "reason": "Agent 自评本代未完成；不接受矛盾或半成品改动",
+            "candidate": {"changed_files": ["agent.py"]},
+            "agent": {
+                "final_answer": "- 改动文件：无\n- 核心改动：无有效落盘改动",
+                "metrics": {
+                    "actions": 3,
+                    "read_calls": 1,
+                    "write_calls": 0,
+                    "duplicate_actions": 0,
+                    "skipped_reads": 0,
+                    "tool_errors": 0,
+                    "zero_tool": False,
+                },
+            },
+        }
+        diagnosis = evolution._diagnose_generation(record)
+        self.assertIn("incomplete_declared", diagnosis["failure_modes"])
+        self.assertEqual(diagnosis["component"], "agent_loop")
+
     def test_diagnose_false_observation_claim(self):
         record = {
             "generation": 21,
