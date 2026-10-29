@@ -71,6 +71,28 @@ def classify_json_truncation_failures(failures: list[str] | None) -> dict:
     return {"count": hits, "category": category, "advice": advice}
 
 
+_WRITE_TOOLS = ("apply_patch", "write_file")
+
+
+def extract_tool_failures(trace: list[dict] | None) -> list[str]:
+    """从真实轨迹中提取 apply_patch / write_file 的失败 Observation。
+
+    trace 的每个 step 是 dict，含 tool / input / observation 字段（与
+    evolution.py 的 _trace_metrics 一致）。失败判定：observation 去空白后以
+    "ERROR" 开头。返回失败信息列表，供 classify_json_truncation_failures 归类。
+    """
+    failures: list[str] = []
+    for item in trace or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("tool") not in _WRITE_TOOLS:
+            continue
+        observation = str(item.get("observation") or "").strip()
+        if observation.startswith("ERROR"):
+            failures.append(observation)
+    return failures
+
+
 def default_objective() -> str:
     """返回没有显式目标时使用的默认改进目标。"""
     return DEFAULT_OBJECTIVE
@@ -86,6 +108,7 @@ def build_generation_question(
     history: str = "",
     experience: str = "",
     tool_failures: list[str] | None = None,
+    trace: list[dict] | None = None,
 ) -> str:
     """构造交给当前 Agent 的下一代开发任务。
 
@@ -96,7 +119,9 @@ def build_generation_question(
     protected = "、".join(str(item) for item in protected_paths if str(item).strip())
     history_text = str(history or "").strip() or "（暂无历史记录；这是第一次自进化。）"
     experience_text = str(experience or "").strip()
-    truncation = classify_json_truncation_failures(tool_failures)
+    merged_failures = list(tool_failures or [])
+    merged_failures.extend(extract_tool_failures(trace))
+    truncation = classify_json_truncation_failures(merged_failures)
     truncation_block = ""
     if truncation["category"]:
         truncation_block = (
