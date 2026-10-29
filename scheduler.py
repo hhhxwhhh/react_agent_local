@@ -19,7 +19,7 @@ import os
 import subprocess
 import sys
 import time
-from datetime import datetime, time, timedelta
+from datetime import datetime, time as clock_time, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -48,17 +48,19 @@ def _log(log, message: str) -> None:
     log.flush()
 
 
-def _parse_clock(value: str) -> time:
+def _parse_clock(value: str) -> clock_time:
     try:
         hour, minute = (int(part) for part in value.strip().split(":", 1))
     except (TypeError, ValueError) as exc:
         raise argparse.ArgumentTypeError(f"时间格式应为 HH:MM：{value!r}") from exc
     if not (0 <= hour <= 23 and 0 <= minute <= 59):
         raise argparse.ArgumentTypeError(f"时间超出范围：{value!r}")
-    return time(hour, minute)
+    return clock_time(hour, minute)
 
 
-def _resolve_window(now: datetime, start: time, end: time) -> tuple[datetime, datetime]:
+def _resolve_window(
+    now: datetime, start: clock_time, end: clock_time
+) -> tuple[datetime, datetime]:
     """返回当前或下一个时间窗口的起止时间。"""
     if end <= start:
         raise ValueError("结束时间必须晚于开始时间")
