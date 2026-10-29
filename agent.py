@@ -168,6 +168,8 @@ def _summarize_observations(records: list[dict], limit: int = 3, chars: int = 30
 # 连续两次被判定为重复调用，或连续三次格式错误后，提前收口。
 MAX_CONSECUTIVE_DUPLICATES = 2
 MAX_CONSECUTIVE_INVALID = 3
+# 同一调用累计重复达到该次数时，注入强制转向消息（不依赖连续计数）。
+MAX_REPEAT_TOTAL = 3
 
 _COLOR_ENABLED = True
 
@@ -1073,6 +1075,7 @@ class ReActAgent:
         )
         scratchpad = ""
         seen_calls: set[str] = set()
+        call_key_counts: dict[str, int] = {}
         consecutive_duplicates = 0
         consecutive_invalid = 0
         action_count = 0
@@ -1201,6 +1204,8 @@ class ReActAgent:
                     )
                     self._check_cancel(cancel_event)
                     call_key = self._call_key(tool_name, args)
+                    call_key_counts[call_key] = call_key_counts.get(call_key, 0) + 1
+                    repeat_total = call_key_counts[call_key]
                     if call_key in seen_calls:
                         duplicate = True
                         consecutive_duplicates += 1
@@ -1244,6 +1249,27 @@ class ReActAgent:
                                 "重复调用不会推进任务。收敛提醒："
                                 + next_action
                                 + " 禁止再次重复同一调用。"
+                            )
+                        # 同一调用累计重复 ≥3 次：无论中间是否穿插其他调用，
+                        # 都注入强制转向消息，避免模型交替执行不同命令绕过
+                        # consecutive_duplicates 的连续计数（本代 duplicate_actions 根因）。
+                        if repeat_total >= MAX_REPEAT_TOTAL:
+                            observation += (
+                                "\n[系统强制转向] 该调用（"
+                                f"{tool_name}）已累计重复 {repeat_total} 次，"
+                                "继续重复不会推进任务。请立即改用 run_tests 验证，"
+                                "或用 write_file / edit_lines / apply_patch 落盘改动；"
+                                "若任务已完成，请直接输出 Final Answer。"
+                            )
+                            self._emit(
+                                {
+                                    "type": "note",
+                                    "step": step,
+                                    "text": (
+                                        f"同一调用累计重复 {repeat_total} 次，"
+                                        "已注入强制转向消息"
+                                    ),
+                                }
                             )
                         self._say(_yellow("(检测到重复调用，已跳过工具执行)"))
                         self._emit(
