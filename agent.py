@@ -228,6 +228,46 @@ def parse_output(text: str) -> tuple[str, object, str]:
     return "invalid", text.strip(), thought
 
 
+def _escape_raw_newlines_in_json(text: str) -> str:
+    """把 JSON 字符串字面量内部的裸换行/制表符转义，便于重试解析。
+
+    模型有时在 Action Input 的字符串值里直接写真实换行（而非 \\n），
+    使 JSON 非法。这里只在“字符串内部”替换，字符串外的换行保持不变。
+    """
+    out: list[str] = []
+    in_string = False
+    escaped = False
+    for char in text:
+        if in_string:
+            if escaped:
+                out.append(char)
+                escaped = False
+                continue
+            if char == "\\":
+                out.append(char)
+                escaped = True
+                continue
+            if char == '"':
+                out.append(char)
+                in_string = False
+                continue
+            if char == "\n":
+                out.append("\\n")
+                continue
+            if char == "\r":
+                out.append("\\r")
+                continue
+            if char == "\t":
+                out.append("\\t")
+                continue
+            out.append(char)
+        else:
+            out.append(char)
+            if char == '"':
+                in_string = True
+    return "".join(out)
+
+
 def parse_action_input(raw_input: str, tool_name: str) -> dict:
     """把模型给的 Action Input 解析成参数字典。
 
@@ -247,6 +287,21 @@ def parse_action_input(raw_input: str, tool_name: str) -> dict:
                 continue
             try:
                 value, _ = decoder.raw_decode(candidate[index:])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict):
+                return value
+
+    # 模型常在 JSON 字符串字面量里直接写真实换行（未转义成 \\n），
+    # 导致 raw_decode 失败并回退到“只取首行”的裸字符串分支，多行内容被截断。
+    # 这里把字符串内部的裸换行/制表符转义后重试一次。
+    repaired = _escape_raw_newlines_in_json(unfenced)
+    if repaired != unfenced:
+        for index, char in enumerate(repaired):
+            if char != "{":
+                continue
+            try:
+                value, _ = decoder.raw_decode(repaired[index:])
             except json.JSONDecodeError:
                 continue
             if isinstance(value, dict):
