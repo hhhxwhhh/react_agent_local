@@ -1135,6 +1135,24 @@ class ReActAgent:
                     if real_obs:
                         observation_claim_rejected = True
                         summary = _summarize_observations(real_obs)
+                        scratchpad += (
+                            "\nObservation: [系统提示] 本代工具真实返回了非空结果，"
+                            "答案中“Observation 为空/不可见”的结论不成立，已被退回。"
+                            "以下是本轮真实收到的部分 Observation，请据此重新作答：\n"
+                            + summary
+                            + "\n"
+                        )
+                        self._say(
+                            _yellow("(答案声称观测为空，已退回并注入真实 Observation)")
+                        )
+                        self._emit(
+                            {
+                                "type": "note",
+                                "step": step,
+                                "text": "答案声称观测为空，已退回并注入真实 Observation",
+                            }
+                        )
+                        continue
                 if (
                     _is_evolution_task(question)
                     and action_count == 0

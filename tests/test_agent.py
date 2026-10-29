@@ -1079,6 +1079,29 @@ class TestLoopGuards(unittest.TestCase):
         self.assertEqual(agent.last_usage["total_tokens"], 15)
 
 
+    def test_false_empty_observation_claim_is_rejected_once(self):
+        llm = FakeLLM(
+            [
+                'Thought: 先读文件。\nAction: read_file\n'
+                'Action Input: {"path": "README.md", "max_chars": 40}',
+                "Thought: 工具好像没返回。\nFinal Answer: 我无法看到工具返回的结果，"
+                "因此没有改动。",
+                "Thought: 已看到真实结果。\nFinal Answer: 已读取 README。",
+            ]
+        )
+        agent = ReActAgent(llm, max_steps=5, verbose=False, use_color=False)
+        answer = agent.run("README 里写了什么？")
+
+        self.assertEqual(answer, "已读取 README。")
+        self.assertEqual(len(llm.calls), 3)
+        self.assertIn("Observation 为空/不可见", llm.calls[2][1])
+        self.assertIn("README.md", llm.calls[2][1])
+        # 只有真实动作进入轨迹，被退回的 Final Answer 不产生 step。
+        self.assertEqual(len(agent.last_trace), 1)
+        self.assertTrue(agent_module._claims_empty_observations("我无法看到工具返回的结果"))
+        self.assertFalse(agent_module._claims_empty_observations("结果是 4"))
+
+
 class TestMemory(unittest.TestCase):
     def setUp(self):
         self._temp = tempfile.TemporaryDirectory()
