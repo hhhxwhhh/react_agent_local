@@ -231,15 +231,22 @@ def parse_output(text: str) -> tuple[str, object, str]:
 
 
 def _escape_raw_newlines_in_json(text: str) -> str:
-    """把 JSON 字符串字面量内部的裸换行/制表符转义，便于重试解析。
+    """把 JSON 字符串字面量内部的裸换行/制表符/裸双引号转义，便于重试解析。
 
     模型有时在 Action Input 的字符串值里直接写真实换行（而非 \\n），
-    使 JSON 非法。这里只在“字符串内部”替换，字符串外的换行保持不变。
+    或在字符串值里写了未转义的双引号，使 JSON 非法。这里只在“字符串内部”
+    替换，字符串外的换行保持不变。
+
+    判断一个双引号是“闭合引号”还是“字符串内的裸引号”：向前看跳过空白，
+    若下一个非空白字符是 JSON 结构符（: , } ]）或已到结尾，则视为闭合引号；
+    否则视为字符串内部的裸引号并转义为 \\"。这样能同时修复裸换行与裸引号
+    导致的截断。
     """
     out: list[str] = []
     in_string = False
     escaped = False
-    for char in text:
+    length = len(text)
+    for index, char in enumerate(text):
         if in_string:
             if escaped:
                 out.append(char)
@@ -250,8 +257,15 @@ def _escape_raw_newlines_in_json(text: str) -> str:
                 escaped = True
                 continue
             if char == '"':
-                out.append(char)
-                in_string = False
+                # 向前看：判断这是闭合引号还是字符串内的裸引号。
+                look = index + 1
+                while look < length and text[look] in " \t\r\n":
+                    look += 1
+                if look >= length or text[look] in ":,}]":
+                    out.append(char)
+                    in_string = False
+                else:
+                    out.append('\\"')
                 continue
             if char == "\n":
                 out.append("\\n")
