@@ -1167,11 +1167,34 @@ class ReActAgent:
                                 "不要为了“再确认一次”重复执行同一 git 命令。"
                             )
                         else:
+                            # 非 git 的普通重复调用：同样注入结构化收敛提醒，
+                            # 依据 landed_files / verification_status 给出唯一动作，
+                            # 与 prompts.py 规则 4c 的“强制唯一动作模板”形成运行时闭环。
+                            if self.landed_files and not self.verification_status:
+                                next_action = (
+                                    "你已有非空改动（"
+                                    + "、".join(self.landed_files[:3])
+                                    + "），请立即用 run_tests 验证并收敛交卷。"
+                                )
+                            elif self.landed_files and self.verification_status:
+                                next_action = (
+                                    "改动已落盘且已通过验证（"
+                                    + self.verification_status
+                                    + "），请立即输出 Final Answer，不要再重复调用。"
+                                )
+                            else:
+                                next_action = (
+                                    "你尚未落盘任何改动，请立即用 write_file / "
+                                    "edit_lines / apply_patch 落地最小改动，"
+                                    "再用 run_tests 验证；若任务无需修改，请直接输出 "
+                                    "Final Answer。"
+                                )
                             observation = (
                                 "[系统] 你刚刚已经用完全相同的参数调用过 "
                                 f"{tool_name}，结果已在上一条 Observation 中。"
-                                "请不要重复调用；请改用不同参数/工具，"
-                                "或基于已有信息直接输出 Final Answer。"
+                                "重复调用不会推进任务。收敛提醒："
+                                + next_action
+                                + " 禁止再次重复同一调用。"
                             )
                         self._say(_yellow("(检测到重复调用，已跳过工具执行)"))
                         self._emit(
