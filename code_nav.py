@@ -483,3 +483,69 @@ def find_importers(
     if total > len(hits):
         lines.append(f"…还有 {total - len(hits)} 处未显示，可缩小 path 或提高 max_results")
     return "\n".join(lines)
+
+
+def _test_module_for(stem: str) -> str:
+    """把源码模块名映射到最可能的测试模块名（tests.test_<stem>）。"""
+    return f"tests.test_{stem}"
+
+
+def suggest_tests(
+    root: Path,
+    paths: list[str],
+    max_results: int = 50,
+) -> str:
+    """把本次改动的文件列表映射到应当优先运行的测试模块。
+
+    纯静态分析：对每个改动文件，若 tests/ 下存在 test_<stem>.py 则建议
+    该测试模块；否则回退到“导入该模块的测试文件”。输出可直接交给
+    run_tests(pattern=...)。只读、无副作用。
+    """
+    if not paths:
+        raise ValueError("paths 不能为空")
+    limit = max(1, min(int(max_results), 200))
+    base = root if root.is_dir() else root.parent
+    tests_dir = base / "tests"
+
+    test_files: dict[str, str] = {}
+    if tests_dir.is_dir():
+        for p in sorted(tests_dir.glob("test_*.py")):
+            test_files[p.stem] = f"tests.{p.stem}"
+
+    suggestions: list[str] = []
+    seen: set[str] = set()
+    notes: list[str] = []
+    for raw in paths:
+        name = str(raw or "").strip()
+        if not name:
+            continue
+        p = Path(name)
+        stem = p.stem
+        direct = test_files.get(f"test_{stem}")
+        if direct and direct not in seen:
+            seen.add(direct)
+            suggestions.append(direct)
+            continue
+        importers = find_importers(base, stem, max_results=limit)
+        matched = False
+        for line in importers.splitlines():
+            if line.startswith("tests/") or line.startswith("tests."):
+                mod = line.split(":", 1)[0]
+                mod = mod[:-3] if mod.endswith(".py") else mod
+                mod = mod.replace("/", ".")
+                if mod not in seen:
+                    seen.add(mod)
+                    suggestions.append(mod)
+                    matched = True
+        if not matched:
+            notes.append(f"{name}: 未找到对应测试，建议全量 run_tests")
+
+    if not suggestions:
+        return "未找到可映射的测试模块，建议运行全量测试：run_tests()"
+    lines = [f"建议优先运行 {len(suggestions)} 个测试模块："]
+    for mod in suggestions[:limit]:
+        lines.append(f"  run_tests(pattern=\"{mod}\")")
+    if notes:
+        lines.append("注意：")
+        lines.extend(f"  {n}" for n in notes)
+    return "\n".join(lines)

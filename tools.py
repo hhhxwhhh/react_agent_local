@@ -2750,6 +2750,20 @@ def find_importers(
     return code_nav.find_importers(target, module, max_results=max_results)
 
 
+def suggest_tests(
+    paths: list[str],
+    path: str = ".",
+    max_results: int = 50,
+) -> str:
+    """把本次改动的文件列表映射到应当优先运行的测试模块，减少全量测试耗时。"""
+    target = _resolve_path(path)
+    if not target.exists():
+        raise ValueError(f"路径不存在：{_display_path(target)}")
+    if not _is_path_allowed(target):
+        raise ValueError(f"路径不在允许访问的范围内：{_display_path(target)}")
+    return code_nav.suggest_tests(target, paths, max_results=max_results)
+
+
 def rename_symbol(
     old: str,
     new: str,
@@ -4587,6 +4601,25 @@ TOOL_SPECS: dict[str, dict] = {
         },
         "context": True,
     },
+    "suggest_tests": {
+        "description": "输入本次改动的文件列表，输出应当优先运行的测试模块（可直接交给 run_tests 的 pattern）。纯静态分析，只读。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "本次改动的文件路径列表，例如 [\"code_nav.py\"]",
+                },
+                "path": {"type": "string", "description": "项目根目录，默认 ."},
+                "max_results": {
+                    "type": "integer",
+                    "description": "最多返回多少个测试模块，默认 50",
+                },
+            },
+            "required": ["paths"],
+        },
+    },
 }
 
 TOOL_FUNCS: dict[str, Callable[..., str]] = {
@@ -4603,6 +4636,7 @@ TOOL_FUNCS: dict[str, Callable[..., str]] = {
     "repo_map": repo_map,
     "find_references": find_references,
     "find_importers": find_importers,
+    "suggest_tests": suggest_tests,
     "rename_symbol": rename_symbol,
     "project_overview": project_overview,
     "import_graph": import_graph,
