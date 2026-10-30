@@ -2245,6 +2245,12 @@ def write_file(
         path=str(target),
     )
 
+    # 语法护栏：.py 文件在落盘前校验最终文本（append 时校验已有内容+新内容）。
+    if append and target.exists():
+        check_python_syntax(target, _read_text_file(target) + text)
+    else:
+        check_python_syntax(target, text)
+
     target.parent.mkdir(parents=True, exist_ok=True)
     with target.open("a" if append else "w", encoding="utf-8", newline="\n") as handle:
         handle.write(text)
@@ -2399,6 +2405,9 @@ def edit_lines(
         line_count=len(new_lines),
     )
 
+    # 语法护栏：.py 文件在落盘前校验最终文本，失败则不改盘。
+    check_python_syntax(target, text_out)
+
     _atomic_write_text(target, text_out)
     _forget_read_history(target)
     return (
@@ -2406,6 +2415,25 @@ def edit_lines(
         f"（起始行 {start}，结束行 {end}，写入 {len(new_lines)} 行，"
         f"文件共 {len(updated_lines)} 行 / {target.stat().st_size} 字节）"
     )
+
+
+def check_python_syntax(path: str | Path, text: str) -> None:
+    """对 .py 目标做语法护栏：语法错误时抛 ValueError，且不触碰磁盘。
+
+    非 .py 文件直接放行，行为不变。错误信息包含“语法错误”与行列号/摘要。
+    """
+    target = Path(path)
+    if target.suffix.lower() != ".py":
+        return
+    try:
+        ast.parse(text, filename=str(target))
+    except SyntaxError as exc:
+        lineno = exc.lineno if exc.lineno is not None else "?"
+        offset = exc.offset if exc.offset is not None else "?"
+        summary = exc.msg or "invalid syntax"
+        raise ValueError(
+            f"语法错误：{_display_path(target)} 第 {lineno} 行第 {offset} 列：{summary}"
+        ) from exc
 
 
 def _atomic_write_text(target: Path, text: str) -> None:
@@ -2506,6 +2534,10 @@ def apply_patch(
         action="patch",
         files=[str(path) for path in changed],
     )
+
+    # 语法护栏：写盘前先校验所有 .py 文件的最终文本，任一失败则整批不写。
+    for path in changed:
+        check_python_syntax(path, _restore_newlines(current[path], newlines[path]))
 
     written: list[Path] = []
     try:
