@@ -843,6 +843,62 @@ def _next_suggestions(entry: dict[str, Any], limit: int = 5) -> list[str]:
     return suggestions[:limit]
 
 
+def _innovation_ideas(entry: dict[str, Any], limit: int = 3) -> list[str]:
+    """提取最终答案里的“创新提案”，供后续创新代采用。"""
+    agent_record = entry.get("agent")
+    if not isinstance(agent_record, dict):
+        return []
+    answer = str(agent_record.get("final_answer") or "")
+    match = re.search(r"##\s*创新提案(.*)", answer, re.S)
+    if not match:
+        return []
+    ideas: list[str] = []
+    for line in match.group(1).splitlines():
+        if line.lstrip().startswith("#"):
+            break
+        item = re.match(r"\s*(?:\d+[.)、]|[-*])\s+(.+)", line)
+        if not item:
+            continue
+        value = _one_line(item.group(1).strip(), 240)
+        if value:
+            ideas.append(value)
+    return ideas[:limit]
+
+
+def _latest_innovation_ideas() -> list[str]:
+    for entry in reversed(_read_ledger()):
+        if entry.get("decision") not in {"accepted", "rejected"}:
+            continue
+        ideas = _innovation_ideas(entry)
+        if ideas:
+            return ideas
+    return []
+
+
+def _innovation_objective(interval: int) -> str:
+    """创新代的目标：提出并实现一个大胆但可验证的新能力。"""
+    lines = [
+        "【创新代】本代不领固定任务，提出并实现一个大胆的新能力，让 Agent 的"
+        "编码能力出现跃迁，而不是只做参数微调或文案修改。",
+        "",
+        "方向示例（不限于此）：新的代码理解方式、跨文件重构、自动生成并运行"
+        "针对性测试、从失败输出自动修复、长期记忆与项目知识、任务规划与分解、"
+        "新的工具协议。",
+        "",
+        "硬要求：",
+        "1. 必须落成可运行的代码，并新增回归测试；不允许只写设计或死代码。",
+        "2. 高风险行为必须放在默认关闭的开关或保守默认后，并说明回退路径。",
+        "3. 改动仍在预算内；做不完就实现最小可用切片，保持闭环。",
+        "4. 不得触碰冻结边界，不得通过减少或改写已有测试来通过。",
+        "5. 最终答案写清：大胆假设是什么、为什么能提升编码能力、如何验证、风险。",
+    ]
+    ideas = _latest_innovation_ideas()
+    if ideas:
+        lines.extend(["", "上一代留下的创新提案（可选其一深化，也可以另起炉灶）："])
+        lines.extend(f"- {idea}" for idea in ideas)
+    return "\n".join(lines)
+
+
 def _suggestion_is_feasible(text: str) -> bool:
     """过滤不可执行或无动作的建议。
 
@@ -1369,6 +1425,8 @@ def _experience_entry(record: dict[str, Any]) -> dict[str, Any]:
         "decision": diagnosis["decision"],
         "net_positive": accepted,
         "objective": _one_line(str(record.get("objective") or ""), 300),
+        "innovation": bool(record.get("innovation")),
+        "innovation_ideas": _innovation_ideas(record),
         "component": diagnosis["component"],
         "failure_modes": diagnosis["failure_modes"],
         "change_summary": change_summary,
@@ -1744,6 +1802,23 @@ def _auto_objective() -> tuple[str, dict[str, Any]]:
         ][-3:]
         for order, item in enumerate(_diagnostic_proposals(latest)):
             if any(_similar(item, old) for old in accepted_recent):
+                continue
+            score, reasons = _score_proposal(item, recent, experience)
+            proposals.append(
+                {
+                    "text": item,
+                    "score": score,
+                    "reasons": reasons,
+                    "order": order,
+                }
+            )
+    if not proposals:
+        proposal_source = "innovation-ideas"
+        # 队列空时，Agent 自己在“创新提案”里留下的想法也进入候选。
+        for order, item in enumerate(_latest_innovation_ideas()):
+            if not _suggestion_is_feasible(item):
+                continue
+            if any(_similar(item, old) for old in recent):
                 continue
             score, reasons = _score_proposal(item, recent, experience)
             proposals.append(
@@ -2169,20 +2244,33 @@ def run_single_generation(args: argparse.Namespace) -> int:
     }
     task: dict[str, Any] | None = None
     task_info: dict[str, Any] = {}
+    innovation = False
     if not objective and not getattr(args, "no_task_driven", False):
-        # 优先做具体编码任务：任务队列里第一个未完成且没耗尽次数的任务。
-        task, task_info = _select_task(int(getattr(args, "task_max_attempts", 2)))
-        if task is not None:
-            objective = _task_objective(task, task_info)
+        interval = int(getattr(args, "innovation_every", 0) or 0)
+        if interval > 0 and generation % interval == 0:
+            # 每隔 N 代留一代给大胆想法：不领固定任务，自己提创新并落地。
+            innovation = True
+            task_info = {"reason": "创新代：不领固定任务"}
+            objective = _innovation_objective(interval)
             objective_info = {
-                "source": "task-queue",
-                "task": task["id"],
-                "attempt": task_info.get("attempt"),
-                "max_attempts": task_info.get("max_attempts"),
+                "source": "innovation",
+                "interval": interval,
                 "chosen": objective,
             }
         else:
-            print(f"[harness] 任务队列不可用：{task_info.get('reason')}")
+            # 平时优先做具体编码任务：队列里第一个未完成且没耗尽次数的任务。
+            task, task_info = _select_task(int(getattr(args, "task_max_attempts", 2)))
+            if task is not None:
+                objective = _task_objective(task, task_info)
+                objective_info = {
+                    "source": "task-queue",
+                    "task": task["id"],
+                    "attempt": task_info.get("attempt"),
+                    "max_attempts": task_info.get("max_attempts"),
+                    "chosen": objective,
+                }
+            else:
+                print(f"[harness] 任务队列不可用：{task_info.get('reason')}")
     if not objective:
         # 任务队列为空/耗尽时，退回上一代复盘里的第一条可执行建议。
         objective, objective_info = _auto_objective()
@@ -2207,6 +2295,7 @@ def run_single_generation(args: argparse.Namespace) -> int:
             if task is not None
             else {"id": None, "reason": task_info.get("reason") if task_info else ""}
         ),
+        "innovation": innovation,
         "baseline": {},
         "candidate": {},
         "agent": {"permissions": []},
@@ -2218,7 +2307,9 @@ def run_single_generation(args: argparse.Namespace) -> int:
     print(f"\n{'=' * 64}")
     print(f"自进化第 {generation} 代")
     print(f"目标来源：{objective_info.get('source', 'cli')}")
-    if task is not None:
+    if innovation:
+        print("模式：创新代（大胆提案 + 可运行落点）")
+    elif task is not None:
         print(
             f"任务：{task['id']}（第 {task_info.get('attempt')}/"
             f"{task_info.get('max_attempts')} 次尝试）"
@@ -2654,6 +2745,8 @@ def _supervisor(args: argparse.Namespace) -> int:
             args.objective,
             "--task-max-attempts",
             str(args.task_max_attempts),
+            "--innovation-every",
+            str(args.innovation_every),
         ]
         if args.no_task_driven:
             argv.append("--no-task-driven")
@@ -2803,6 +2896,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=2,
         help="任务未在 tasks.json 单独配置时，每个任务最多尝试几代",
     )
+    parser.add_argument(
+        "--innovation-every",
+        type=int,
+        default=4,
+        help="每隔多少代留一代做自主创新；0 表示关闭",
+    )
     parser.add_argument("--no-color", action="store_true")
     parser.add_argument("--status", action="store_true", help="查看历史记录")
     parser.add_argument(
@@ -2833,6 +2932,7 @@ def main(argv: list[str] | None = None) -> int:
     args.test_timeout = max(30, int(args.test_timeout))
     args.eval_timeout = max(30, int(args.eval_timeout))
     args.task_max_attempts = max(1, int(args.task_max_attempts))
+    args.innovation_every = max(0, int(args.innovation_every))
 
     if args.generations > 1 and not args.once:
         return _supervisor(args)

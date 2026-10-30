@@ -125,6 +125,70 @@ class TestTaskDrivenEvolution(unittest.TestCase):
         self.assertFalse(bad.ok)
         self.assertEqual(bad.returncode, 3)
 
+    def test_innovation_ideas_are_parsed_from_final_answer(self):
+        entry = {
+            "agent": {
+                "final_answer": (
+                    "改动完成。\n\n## 创新提案\n"
+                    "- 做一个调用图工具，先找调用点再改代码\n"
+                    "- 基于失败输出自动生成最小复现测试\n"
+                    "## 风险\n不应被当成提案\n"
+                )
+            }
+        }
+        ideas = evolution._innovation_ideas(entry)
+        self.assertEqual(len(ideas), 2)
+        self.assertIn("调用图", ideas[0])
+        self.assertFalse(any("不应" in idea for idea in ideas))
+
+    def test_innovation_objective_includes_latest_ideas(self):
+        ledger = [
+            {
+                "decision": "rejected",
+                "agent": {"final_answer": "## 创新提案\n- 自动生成失败复现\n"},
+            }
+        ]
+        with patch.object(evolution, "_read_ledger", return_value=ledger):
+            text = evolution._innovation_objective(4)
+        self.assertIn("创新代", text)
+        self.assertIn("自动生成失败复现", text)
+        self.assertIn("回退路径", text)
+        self.assertIn("最小可用切片", text)
+
+    def test_auto_objective_falls_back_to_innovation_ideas(self):
+        ledger = [
+            {
+                "generation": 65,
+                "decision": "rejected",
+                "objective": "旧目标",
+                "reason": "候选测试未通过",
+                "agent": {"final_answer": "", "metrics": {"actions": 1}},
+                "candidate": {"changed_files": ["agent.py"]},
+            }
+        ]
+        with patch.object(evolution, "_read_ledger", return_value=ledger), patch.object(
+            evolution, "_read_experience", return_value=[]
+        ), patch.object(
+            evolution,
+            "_latest_innovation_ideas",
+            return_value=["新增调用图工具，用于定位跨文件调用点"],
+        ):
+            objective, info = evolution._auto_objective()
+        self.assertIn("调用图", objective)
+        self.assertEqual(info["proposal_source"], "innovation-ideas")
+
+    def test_question_includes_innovation_space(self):
+        question = harness.build_generation_question(
+            generation=1,
+            objective="做任务",
+            baseline_commit="abc1234",
+            max_diff_lines=600,
+            protected_paths=["data/"],
+        )
+        self.assertIn("创新空间", question)
+        self.assertIn("## 创新提案", question)
+        self.assertIn("大胆", question)
+
     def test_question_includes_task_block(self):
         question = harness.build_generation_question(
             generation=1,

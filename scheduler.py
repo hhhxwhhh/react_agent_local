@@ -173,6 +173,7 @@ def _run_generation(
     max_diff_lines: int | None = None,
     no_task_driven: bool = False,
     task_max_attempts: int | None = None,
+    innovation_every: int | None = None,
 ) -> int:
     cmd = [
         sys.executable,
@@ -194,6 +195,8 @@ def _run_generation(
         cmd.append("--no-task-driven")
     if task_max_attempts is not None:
         cmd += ["--task-max-attempts", str(task_max_attempts)]
+    if innovation_every is not None:
+        cmd += ["--innovation-every", str(innovation_every)]
     env = dict(os.environ)
     env["PYTHONIOENCODING"] = "utf-8"
     # 计划任务的 PATH 可能比交互式终端短；显式补上当前解释器目录，
@@ -238,12 +241,18 @@ def _run_once(
     max_diff_lines: int | None = None,
     no_task_driven: bool = False,
     task_max_attempts: int | None = None,
+    innovation_every: int | None = None,
 ) -> int:
     if not _preflight(log):
         return 2
     before = len(_ledger_entries())
     returncode = _run_generation(
-        log, max_steps, max_diff_lines, no_task_driven, task_max_attempts
+        log,
+        max_steps,
+        max_diff_lines,
+        no_task_driven,
+        task_max_attempts,
+        innovation_every,
     )
     _log_new_entries(log, before)
     return 0 if returncode == 0 else returncode
@@ -292,6 +301,7 @@ def _run_window(args, log) -> int:
             args.max_diff_lines,
             args.no_task_driven,
             args.task_max_attempts,
+            args.innovation_every,
         )
         _log_new_entries(log, before)
         if returncode != 0:
@@ -352,6 +362,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="每个编码任务最多尝试几代（默认用 evolution.py 的 2）",
     )
     parser.add_argument(
+        "--innovation-every",
+        type=int,
+        default=None,
+        help="每隔多少代留一代做自主创新；0 关闭（默认用 evolution.py 的 4）",
+    )
+    parser.add_argument(
         "--once",
         action="store_true",
         help="立即运行一代并退出，不等待时间窗口（用于手动验证）",
@@ -387,6 +403,8 @@ def main(argv: list[str] | None = None) -> int:
         args.max_diff_lines = max(10, int(args.max_diff_lines))
     if args.task_max_attempts is not None:
         args.task_max_attempts = max(1, int(args.task_max_attempts))
+    if args.innovation_every is not None:
+        args.innovation_every = max(0, int(args.innovation_every))
 
     SCHEDULER_DIR.mkdir(parents=True, exist_ok=True)
     log_path = SCHEDULER_DIR / f"{datetime.now():%Y-%m-%d}.log"
@@ -418,6 +436,7 @@ def main(argv: list[str] | None = None) -> int:
                     args.max_diff_lines,
                     args.no_task_driven,
                     args.task_max_attempts,
+                    args.innovation_every,
                 )
             return _run_window(args, log)
         finally:
