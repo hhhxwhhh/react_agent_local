@@ -860,6 +860,31 @@ class ReActAgent:
             )
         return base + " 禁止再次重复同一调用。"
 
+    def _precheck_test_failure(self, tool_name: str, observation: str) -> str | None:
+        """run_tests 失败后，把失败用例解析成结构化定向修复提示。
+
+        默认开启但只做“追加提示”，不改变工具结果本身；解析不到失败
+        用例时返回 None，行为与改动前完全一致（保守回退路径）。
+        """
+        if tool_name != "run_tests" or not observation:
+            return None
+        try:
+            from test_failure_parser import format_failure_hint, parse_test_failures
+
+            failures = parse_test_failures(observation)
+            hint = format_failure_hint(failures)
+        except Exception:
+            return None
+        if not hint:
+            return None
+        self._emit(
+            {
+                "type": "note",
+                "text": f"run_tests 失败已结构化解析 {len(failures)} 条用例",
+            }
+        )
+        return "\n" + hint
+
     def _precheck_search_after(self, tool_name: str, args: dict) -> str | None:
         """search_files 首次返回后注入前置提示，避免“搜索后不落盘”。
 
@@ -1510,6 +1535,11 @@ class ReActAgent:
                                 # 占比仍高，瓶颈在“搜索后不落盘”。这里在首次
                                 # 成功返回后立即引导下一步 read_file 精确区间
                                 # 或落盘，而不是等到重复才提醒。
+                                failure_hint = self._precheck_test_failure(
+                                    tool_name, observation
+                                )
+                                if failure_hint is not None:
+                                    observation += failure_hint
                                 search_hint = self._precheck_search_after(
                                     tool_name, args
                                 )
