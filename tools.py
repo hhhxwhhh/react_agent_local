@@ -2478,15 +2478,18 @@ def _ast_impact_references(
     target: Path,
     removed: list[str],
     changed: list[str],
+    added: list[str] | None = None,
     max_symbols: int = 5,
     max_refs: int = 3,
 ) -> list[str]:
-    """写前影响面反查：对删除/签名变化的符号列出调用点（file:line）。
+    """写前影响面反查：对删除/签名变化/新增遮蔽的符号列出调用点（file:line）。
 
+    added 中的符号表示“新增但可能与旧代码同名、造成遮蔽”的符号，同样需要
+    反查调用点，避免新定义悄悄改变既有引用的解析目标。
     只读、失败静默：任何异常都返回空列表，绝不阻断写入。
     """
     symbols: list[str] = []
-    for name in list(removed) + list(changed):
+    for name in list(removed) + list(changed) + list(added or []):
         base = name.split(".", 1)[0]
         if base and base not in symbols:
             symbols.append(base)
@@ -2537,6 +2540,23 @@ def _ast_diff_summary(path: str | Path, old_text: str, new_text: str) -> str:
     ]
     if not (added or removed or changed):
         return ""
+    # 新增同名符号可能遮蔽旧定义：基名在旧代码中已存在即视为遮蔽风险。
+    # 注意 _collect_top_level_defs 用 dict 存储，同名定义会互相覆盖，
+    # 因此还要单独扫描新代码顶层定义名，检测“重复定义”造成的遮蔽。
+    old_bases = {name.split(".", 1)[0] for name in old_defs}
+    shadowed: list[str] = []
+    for name in added:
+        base = name.split(".", 1)[0]
+        if base in old_bases and name not in shadowed:
+            shadowed.append(name)
+    seen_new: set[str] = set()
+    for node in getattr(new_tree, "body", []):
+        node_name = getattr(node, "name", None)
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        if node_name in seen_new and node_name not in shadowed:
+            shadowed.append(node_name)
+        seen_new.add(node_name)
     lines = [f"AST 结构预演：{_display_path(target)}"]
     if added:
         lines.append("  新增：" + "、".join(f"{n}（{new_defs[n]}）" for n in added))
@@ -2549,10 +2569,27 @@ def _ast_diff_summary(path: str | Path, old_text: str, new_text: str) -> str:
                 f"{n}：{old_defs[n]} -> {new_defs[n]}" for n in changed
             )
         )
-    # 写前影响面反查：删除/签名变化会打断调用点，落盘前先列出引用位置。
-    impact = _ast_impact_references(target, removed, changed)
+    if shadowed:
+        lines.append(
+            "  遮蔽风险："
+            + "、".join(shadowed)
+            + "（新增符号与旧定义同名，可能改变既有引用的解析目标）"
+        )
+    # 写前影响面反查：删除/签名变化/新增遮蔽都会影响调用点，落盘前先列出引用位置。
+    impact = _ast_impact_references(target, removed, changed, added=shadowed)
     if impact:
         lines.extend(impact)
+    # 给出建议的 find_references 命令，方便 Agent 一键复核。
+    review_symbols: list[str] = []
+    for name in list(removed) + list(changed) + shadowed:
+        base = name.split(".", 1)[0]
+        if base and base not in review_symbols:
+            review_symbols.append(base)
+    if review_symbols:
+        cmds = "；".join(
+            f'find_references(symbol="{s}")' for s in review_symbols[:5]
+        )
+        lines.append(f"  建议复核：{cmds}")
     return "\n".join(lines)
 
 
