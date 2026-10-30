@@ -753,6 +753,35 @@ class ReActAgent:
             "或直接基于已有 Observation 输出 Final Answer。"
         )
 
+    def _precheck_persist_priority(self, tool_name: str, args: dict) -> str | None:
+        """落盘优先预检：反复 read_file 同一文件却迟迟不落盘时注入强制落盘提醒。
+
+        统计本会话内对同一 path 的 read_file 次数；达到阈值且期间没有任何
+        写工具落地时，返回提醒文本，让模型停止盲读、立即落盘。
+        返回提醒文本；无需提醒时返回 None。
+        """
+        if tool_name != "read_file":
+            return None
+        path = args.get("path")
+        if not isinstance(path, str) or not path:
+            return None
+        counts = getattr(self, "_read_path_counts", None)
+        if counts is None:
+            counts = {}
+            self._read_path_counts = counts
+        counts[path] = counts.get(path, 0) + 1
+        if counts[path] < 3:
+            return None
+        if getattr(self, "_persist_happened", False):
+            return None
+        return (
+            "[系统提醒] 你已对同一文件连续读取 "
+            f"{counts[path]} 次，但尚未产生任何落盘改动。"
+            "请立即停止重复读取：基于已有 Observation 确定最小改动，"
+            "直接用 apply_patch / edit_lines / write_file 落盘，"
+            "再用 run_tests 验证；若任务无需修改，请直接输出 Final Answer。"
+        )
+
     @staticmethod
     def _is_git_readonly_call(tool_name: str, args: dict) -> bool:
         """判断一次调用是否是只读 git 命令（git status / git diff 等）。
@@ -1412,9 +1441,24 @@ class ReActAgent:
                                 }
                             )
                         else:
-                            observation = run_tool(
-                                tool_name, args, context=self.tool_context
+                            # 落盘优先预检：模型反复 read_file 同一文件却迟迟不落盘时，
+                            # 注入强制落盘提示，避免 blind_read_loop 耗尽轮次。
+                            persist_reminder = self._precheck_persist_priority(
+                                tool_name, args
                             )
+                            if persist_reminder is not None:
+                                observation = persist_reminder
+                                self._emit(
+                                    {
+                                        "type": "note",
+                                        "step": step,
+                                        "text": "检测到反复读取未落盘，已注入落盘优先提醒",
+                                    }
+                                )
+                            else:
+                                observation = run_tool(
+                                    tool_name, args, context=self.tool_context
+                                )
                         # 工具层硬跳过与循环层联动：连续多次被硬跳过时，
                         # 直接注入系统消息，强制模型改用 search_files 定位。
                         # 与 tools.py 中 read_file 的计数 key 保持一致：
@@ -1502,6 +1546,8 @@ class ReActAgent:
                         )
                     if landed:
                         read_only_streak = 0
+                        # 一旦真正落盘，解除“落盘优先”提醒的触发条件。
+                        self._persist_happened = True
                         # run_command 只重置只读计数，不计入 landed_files：
                         # 它常被用于探索/验证，不代表真正落盘改动。
                         if tool_name in WRITE_TOOLS:
