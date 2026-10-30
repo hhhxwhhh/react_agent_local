@@ -257,6 +257,7 @@ python evolution.py --generations 3 --yes \
   → 冻结路径检查（tests/、evolution.py、evaluation.py、config.py、.env 等）
   → 改动量预算 + py_compile + 安全检查
   → 完整测试通过且测试数不减少
+  → 新增顶层函数/类至少有一处静态引用（防止死代码通过验收）
   → 评测分数不低于 baseline（可继续调高 --min-delta）
   → 接受：git commit + tag evo-gen-N
   → 拒绝：保存 diff 到 data/evolution/rejected/ 并 git reset --hard 回滚
@@ -306,6 +307,9 @@ python -X utf8 benchmark/compare.py baseline_results/ candidate_results/
 # 汇总最新结果与自进化历史
 python -X utf8 benchmark/metrics.py
 ```
+
+也可以把 `benchmark/gate.py` 接成 `evolution.py` 的可选评分命令；它会在
+baseline 和 candidate 两边各跑 3 个代表任务，成本高，适合里程碑代而不是每代。
 
 任务格式、隔离边界、指标口径和新增任务的方法见
 [benchmark/README.md](benchmark/README.md)。这是进程级和文件工具级隔离，
@@ -706,7 +710,7 @@ react_agent/
 
 ## 7. 测试
 
-离线测试（共 324 个用例，不需要 Key、不需要网络；符号链接用例在无权限的
+离线测试（共 331 个用例，不需要 Key、不需要网络；符号链接用例在无权限的
 Windows 环境会自动跳过）：
 
 ```bash
@@ -728,7 +732,8 @@ TTL 与过期清理、容量上限、上下文预算、单轮/跨轮上下文压
 反向地理编码供应商回退、正向地理编码候选与回退、`/api/chat` 坐标传递与不落盘、
 非法坐标 422 校验、历史与记忆注入、SSE 流式接口、会话落盘、自进化裁判的
 冻结路径检查、diff 行数预算、测试/评分解析、临时沙箱安全探针、历史迭代摘要
-与建议闭环、root 文件访问模式、用量 JSON、基准任务的参考解/篡改检测/指标聚合，
+与建议闭环、root 文件访问模式、用量 JSON、工具消融、基准任务的参考解/篡改检测/
+指标聚合/A-B 对比/评分门禁、新增顶层符号的死代码检测，
 以及 12 个离线行为评测场景（读取、行区间读取、错误恢复、会话记忆、批量补丁
 原子性、权限拒绝、受保护路径、重复调用、未知工具、强制收口、引用提取）。
 

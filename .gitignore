@@ -19,6 +19,7 @@ workspace/*
 !workspace/notes/**
 
 # Benchmark 运行产物：保留 .gitkeep，结果本地留存
-benchmark/results/*.json
+benchmark/results/*
+!benchmark/results/.gitkeep
 benchmark/workspaces/
 benchmark/.work/

@@ -10,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from benchmark import compare, metrics, runner  # noqa: E402
+from benchmark import compare, gate, metrics, runner  # noqa: E402
 
 
 class TestBenchmarkTasks(unittest.TestCase):
@@ -127,6 +127,17 @@ class TestBenchmarkSafety(unittest.TestCase):
             "total_tokens": 0,
             "llm_calls": 0,
         })
+
+
+class TestBenchmarkGate(unittest.TestCase):
+    def test_score_results(self):
+        self.assertEqual(gate.score_results([]), 0.0)
+        self.assertEqual(
+            gate.score_results(
+                [{"success": True}, {"success": False}, {"success": True}]
+            ),
+            2 / 3,
+        )
 
 
 class TestMetrics(unittest.TestCase):

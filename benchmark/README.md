@@ -62,6 +62,20 @@ python -X utf8 benchmark/compare.py benchmark/results/baseline benchmark/results
 
 `compare.py` 只比较两边都出现过的任务；有回归时退出码为 1，适合放进发布检查。
 
+### 接成自进化评分门禁（可选，成本高）
+
+`gate.py` 跑 3 个代表任务，输出 `score=<解决率>`，可临时替换
+`evolution.py` 默认的离线评测：
+
+```bash
+python evolution.py --generations 1 --yes \
+  --eval-command "python -X utf8 benchmark/gate.py"
+```
+
+baseline 和 candidate 会各跑一次，单代成本约为一次完整小基准的两倍；日常代
+建议仍用 `evaluation.py`，只在里程碑、发布前或大改提示词/工具集时启用。
+`--tasks` 可换题，`--results-dir` 保留每次评分证据。
+
 结果默认写到 `benchmark/results/`。同一任务有多份结果时，`metrics.py` 只取
 时间戳最新的一份，所以可以反复跑而不必先清空目录。
 
