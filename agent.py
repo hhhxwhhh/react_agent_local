@@ -1303,6 +1303,41 @@ class ReActAgent:
                                 + next_action
                                 + " 禁止再次重复同一调用。"
                             )
+                        # 只读 git 命令 + 已有非空改动 + 尚未验证：第 2 次重复即
+                        # 强制收口转向 run_tests。本代诊断 duplicate_actions_after_diff
+                        # 表明模型拿到非空 diff 后仍反复 git 只读调用，等到第 3 次
+                        # 才收口太晚；这里把“已有改动”场景的阈值提前到 2。
+                        if (
+                            self._is_git_readonly_call(tool_name, args)
+                            and self.landed_files
+                            and not self.verification_status
+                            and repeat_total >= 2
+                        ):
+                            observation += (
+                                "\n[系统强制转向] 你已有非空改动（"
+                                + "、".join(self.landed_files[:3])
+                                + "），且已重复执行只读 git 命令 "
+                                + f"{repeat_total} 次。请立即用 run_tests 验证，"
+                                "不要再重复 git 只读调用。"
+                            )
+                            self._emit(
+                                {
+                                    "type": "note",
+                                    "step": step,
+                                    "text": (
+                                        "只读 git 命令在已有改动后重复 "
+                                        f"{repeat_total} 次，已提前收口转向 run_tests"
+                                    ),
+                                }
+                            )
+                            stalled = True
+                            stall_reason = "git_readonly_after_diff"
+                            self._say(
+                                _yellow(
+                                    "(已有改动后重复只读 git 命令，提前收口并生成最终答案)"
+                                )
+                            )
+                            break
                         # 同一调用累计重复 ≥3 次：无论中间是否穿插其他调用，
                         # 都注入强制转向消息，避免模型交替执行不同命令绕过
                         # consecutive_duplicates 的连续计数（本代 duplicate_actions 根因）。
