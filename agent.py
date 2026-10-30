@@ -810,10 +810,6 @@ class ReActAgent:
                     ]
                     if paths:
                         label = f"apply_patch:{','.join(paths)}"
-            elif tool_name == "run_command":
-                command = str(args.get("command", "")).strip()
-                if command:
-                    label = f"run_command:{command[:80]}"
         if label not in self.landed_files:
             self.landed_files.append(label)
 
@@ -1410,7 +1406,10 @@ class ReActAgent:
                         )
                     if landed:
                         read_only_streak = 0
-                        self._record_landed(tool_name, args)
+                        # run_command 只重置只读计数，不计入 landed_files：
+                        # 它常被用于探索/验证，不代表真正落盘改动。
+                        if tool_name in WRITE_TOOLS:
+                            self._record_landed(tool_name, args)
                     else:
                         read_only_streak += 1
                     if tool_name == "run_tests":
