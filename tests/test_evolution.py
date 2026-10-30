@@ -167,6 +167,9 @@ class TestEvolutionHelpers(unittest.TestCase):
         self.assertIn("禁止虚构工具调用", question)
         self.assertIn("本代轨迹", question)
         self.assertIn("执行协议", question)
+        self.assertIn("长期目标", question)
+        self.assertIn("编码 Agent", question)
+        self.assertIn("读码 → 改码 → 验证", question)
 
         with_history = harness.build_generation_question(
             generation=4,
