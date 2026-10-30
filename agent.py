@@ -1192,6 +1192,11 @@ class ReActAgent:
         self.last_compactions = 0
         self.last_history_summary = str(history_summary or "").strip()
         self.last_history_summary_count = 0
+        # 每个任务开始时重置跨轮状态，避免长会话中前置提示只生效一次、
+        # 或上一任务的落盘/验证状态污染本次判断。
+        self._search_after_hinted = False
+        self.landed_files = []
+        self.verification_status = ""
         reset_usage = getattr(self.llm, "reset_usage", None)
         if callable(reset_usage):
             reset_usage()
