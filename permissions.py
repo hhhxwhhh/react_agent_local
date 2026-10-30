@@ -26,6 +26,7 @@ FILE_WRITE_TOOLS = {
     "apply_patch",
     "move_file",
     "delete_file",
+    "plan",
 }
 
 _SAFE_COMMANDS = {
@@ -185,5 +186,27 @@ def decide_permission(
         if mode == "auto":
             return True
         return True if is_read_only_command(command) else None
+
+    if tool in {"run_build", "sandbox_run"}:
+        if is_destructive_command(payload.get("command") or ""):
+            return False
+        if not _inside(payload.get("cwd") or ".", root):
+            return None
+        # 构建会在项目内产生缓存/产物，edits 模式仍先询问；auto 才自动放行。
+        return True if mode == "auto" else None
+
+    if tool == "http_request":
+        method = str(payload.get("method") or "GET").upper()
+        if method in {"GET", "HEAD", "OPTIONS"}:
+            return True
+        return True if mode == "auto" else None
+
+    if tool == "sqlite_query":
+        database = payload.get("database") or payload.get("path")
+        if not _inside(database, root):
+            return None
+        if payload.get("allow_write"):
+            return True if mode == "auto" else None
+        return True
 
     return None

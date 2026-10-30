@@ -21,6 +21,7 @@ import re
 import shutil
 import signal
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -36,6 +37,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import requests
 
 import code_nav
+import code_quality
 from config import (
     BASE_DIR,
     COMMAND_MAX_OUTPUT_CHARS,
@@ -3272,6 +3274,584 @@ def get_exchange_rate(base: str, target: str, amount: float = 1.0) -> str:
 
 
 # ---------------------------------------------------------------------------
+# 代码理解、质量审计、构建与外部系统工具
+# ---------------------------------------------------------------------------
+
+PLAN_FILE = WORKSPACE_DIR / ".agent_plan.json"
+LEDGER_FILE = BASE_DIR / "data" / "evolution" / "ledger.jsonl"
+SECRET_ENV_MARKERS = re.compile(
+    r"(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH|COOKIE|SESSION)", re.I
+)
+
+
+def project_overview(path: str = ".", max_largest: int = 10) -> str:
+    """统计项目语言、目录布局、入口文件、测试与最大文件。"""
+    target = _resolve_path(path)
+    if not target.exists():
+        raise ValueError(f"路径不存在：{_display_path(target)}")
+    if not _is_path_allowed(target):
+        raise ValueError("路径不在允许访问的范围内")
+    return code_quality.project_overview(
+        target, max_largest=max(1, min(int(max_largest), 30))
+    )
+
+
+def import_graph(path: str = ".", max_edges: int = 120) -> str:
+    """构建项目内部 Python 模块依赖图，报告扇入扇出与循环依赖。"""
+    target = _resolve_path(path)
+    if not target.exists():
+        raise ValueError(f"路径不存在：{_display_path(target)}")
+    if not _is_path_allowed(target):
+        raise ValueError("路径不在允许访问的范围内")
+    return code_quality.import_graph(target, max_edges=max(10, min(int(max_edges), 300)))
+
+
+def code_audit(
+    path: str = ".",
+    mode: str = "review",
+    max_items: int = 50,
+) -> str:
+    """运行 syntax / lint / security / deps / review 审计。"""
+    target = _resolve_path(path)
+    if not target.exists():
+        raise ValueError(f"路径不存在：{_display_path(target)}")
+    if not _is_path_allowed(target):
+        raise ValueError("路径不在允许访问的范围内")
+    return code_quality.code_audit(
+        target, mode, max_items=max(1, min(int(max_items), 200))
+    )
+
+
+def log_tail(path: str, lines: int = 80, keyword: str = "") -> str:
+    """读取日志文件末尾若干行，可按关键词过滤。"""
+    target = _resolve_path(path)
+    if not target.exists():
+        raise ValueError(f"路径不存在：{_display_path(target)}")
+    if not target.is_file():
+        raise ValueError("log_tail 只支持单个文件")
+    if not _is_path_allowed(target):
+        raise ValueError("路径不在允许访问的范围内")
+
+    limit = max(1, min(int(lines), 500))
+    keyword = str(keyword or "").strip()
+    size = target.stat().st_size
+    window = min(size, 2_000_000)
+    with target.open("rb") as handle:
+        handle.seek(max(0, size - window))
+        raw = handle.read()
+    text = raw.decode("utf-8", errors="replace")
+    rows = text.splitlines()
+    if window < size and rows:
+        rows = rows[1:]  # 丢掉从中途截断的第一行
+    if keyword:
+        lowered = keyword.lower()
+        rows = [row for row in rows if lowered in row.lower()]
+    selected = rows[-limit:]
+
+    header = f"日志：{_display_path(target)}（{size} B）"
+    if keyword:
+        header += f"；关键词：{keyword}"
+    header += f"；显示最后 {len(selected)} 行"
+    if not selected:
+        return header + "\n（没有匹配的日志行）"
+    return header + "\n" + "\n".join(selected)
+
+
+def _detect_build_command(workdir: Path) -> str:
+    package_json = workdir / "package.json"
+    if package_json.is_file():
+        try:
+            scripts = json.loads(_read_text_file(package_json)).get("scripts") or {}
+        except (ValueError, OSError):
+            scripts = {}
+        for name in ("build", "test", "lint"):
+            if isinstance(scripts, dict) and name in scripts:
+                return f"npm run {name}"
+        return "npm run build"
+    if (workdir / "Makefile").is_file():
+        return "make"
+    if (workdir / "Cargo.toml").is_file():
+        return "cargo build"
+    if (workdir / "go.mod").is_file():
+        return "go build ./..."
+    if any(
+        (workdir / name).is_file()
+        for name in ("pyproject.toml", "setup.py", "requirements.txt")
+    ):
+        return f'"{sys.executable}" -m compileall -q .'
+    return f'"{sys.executable}" -m compileall -q .'
+
+
+def run_build(
+    cwd: str = ".",
+    command: str = "",
+    timeout: int = 300,
+    dry_run: bool = False,
+    *,
+    context: ToolContext | None = None,
+) -> str:
+    """检测并运行项目构建/编译命令；dry_run 只报告将执行的命令。"""
+    workdir = _resolve_path(cwd or ".")
+    if not workdir.exists():
+        raise ValueError(f"工作目录不存在：{_display_path(workdir)}")
+    if not workdir.is_dir():
+        raise ValueError(f"工作目录不是目录：{_display_path(workdir)}")
+
+    chosen = str(command or "").strip() or _detect_build_command(workdir)
+    if dry_run:
+        return f"构建目录：{workdir}\n将执行：{chosen}"
+
+    limit_timeout = max(10, min(int(timeout or 300), 600))
+    _request_permission(
+        context,
+        tool="run_build",
+        title="构建执行权限",
+        detail=f"Agent 想在以下目录执行构建：\n{workdir}\n\n命令：\n{chosen}",
+        action="build",
+        command=chosen,
+        cwd=str(workdir),
+    )
+    code, output, elapsed, timed_out = _run_capture(
+        _shell_argv(chosen), workdir, limit_timeout
+    )
+    if timed_out:
+        status = f"ERROR: 构建超时（{limit_timeout} 秒），已终止"
+    elif code == 0:
+        status = "结果：通过"
+    else:
+        status = f"结果：失败（退出码 {code}）"
+    return (
+        f"构建目录：{workdir}\n命令：{chosen}\n{status}\n"
+        f"耗时：{elapsed:.2f}s\n\n{output}"
+    )
+
+
+def http_request(
+    url: str,
+    method: str = "GET",
+    headers: dict[str, str] | None = None,
+    body: str = "",
+    timeout: int = 30,
+    max_chars: int = 4000,
+    *,
+    context: ToolContext | None = None,
+) -> str:
+    """发送 HTTP 请求；GET/HEAD/OPTIONS 只读，其余方法需要授权。"""
+    url = str(url or "").strip()
+    method = str(method or "GET").strip().upper()
+    allowed = {"GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"}
+    if method not in allowed:
+        raise ValueError(f"不支持的 HTTP 方法：{method}")
+    _assert_public_url(url)
+
+    send_headers: dict[str, str] = {}
+    if isinstance(headers, dict):
+        for key, value in list(headers.items())[:20]:
+            send_headers[str(key)] = str(value)
+
+    read_only = method in {"GET", "HEAD", "OPTIONS"}
+    if not read_only:
+        mode = normalize_mode(getattr(context, "permission_mode", "ask"))
+        if mode == "readonly":
+            raise PermissionError("当前授权模式（readonly）拒绝了会改变远端状态的请求")
+        _request_permission(
+            context,
+            tool="http_request",
+            title="HTTP 请求权限",
+            detail=f"Agent 想发送 {method} 请求：\n{url}",
+            action="http_request",
+            method=method,
+            url=url,
+        )
+
+    limit_timeout = max(1, min(int(timeout or 30), 120))
+    limit_chars = max(200, min(int(max_chars or 4000), MAX_OBSERVATION_CHARS))
+    data = body.encode("utf-8") if body else None
+    started = time.monotonic()
+    try:
+        response = requests.request(
+            method,
+            url,
+            headers=send_headers or None,
+            data=data,
+            timeout=limit_timeout,
+            allow_redirects=False,
+        )
+    except requests.RequestException as exc:
+        raise RuntimeError(f"请求失败：{type(exc).__name__}: {exc}") from exc
+    elapsed = time.monotonic() - started
+
+    content_type = response.headers.get("Content-Type", "")
+    text = _decode_page(response.content, response.encoding)
+    truncated = len(text) > limit_chars
+    lines = [
+        f"HTTP {response.status_code} {response.reason}",
+        f"耗时：{elapsed:.2f}s；Content-Type：{content_type or '未知'}",
+    ]
+    location = response.headers.get("Location")
+    if location:
+        lines.append(f"重定向目标：{location}（未自动跟随）")
+    lines.append("")
+    lines.append(text[:limit_chars])
+    if truncated:
+        lines.append("...[响应体已截断]")
+    return "\n".join(lines)
+
+
+def _sqlite_params(values: Any) -> tuple:
+    if values in (None, ""):
+        return ()
+    if not isinstance(values, (list, tuple)):
+        raise ValueError("params 必须是 JSON 数组")
+    converted = []
+    for value in values:
+        if isinstance(value, (dict, list)):
+            raise ValueError("params 元素只能是字符串、数字、布尔或 null")
+        if isinstance(value, bool):
+            converted.append(int(value))
+        elif value is None or isinstance(value, (int, float, str)):
+            converted.append(value)
+        else:
+            raise ValueError(f"不支持的参数类型：{type(value).__name__}")
+    return tuple(converted)
+
+
+def _format_sql_value(value: Any) -> str:
+    if value is None:
+        return "NULL"
+    if isinstance(value, bytes):
+        return f"<{len(value)} bytes>"
+    text = repr(value)
+    return text if len(text) <= 120 else text[:117] + "..."
+
+
+def sqlite_query(
+    database: str,
+    query: str,
+    params: list | None = None,
+    allow_write: bool = False,
+    max_rows: int = 100,
+    *,
+    context: ToolContext | None = None,
+) -> str:
+    """查询 SQLite；默认只读打开，写操作需显式 allow_write 并授权。"""
+    query = str(query or "").strip()
+    if not query:
+        raise ValueError("query 不能为空")
+    lowered = query.lower()
+    if re.match(r"^(attach|detach)\b", lowered) or "load_extension" in lowered:
+        raise ValueError("不允许 ATTACH/DETACH 或 load_extension")
+    if ";" in query.rstrip().rstrip(";") and not query.rstrip().endswith(";"):
+        raise ValueError("一次只能执行一条 SQL 语句")
+    if sqlite3.complete_statement(query) is False and ";" in query:
+        raise ValueError("SQL 语句不完整")
+
+    target = _resolve_path(database)
+    if not target.exists():
+        if not allow_write:
+            raise ValueError(f"数据库不存在：{_display_path(target)}")
+        if not target.parent.is_dir():
+            raise ValueError(f"数据库所在目录不存在：{_display_path(target.parent)}")
+    if not _is_path_allowed(target):
+        raise ValueError("路径不在允许访问的范围内")
+
+    limit_rows = max(1, min(int(max_rows or 100), 1000))
+    parameters = _sqlite_params(params)
+
+    if allow_write:
+        _request_permission(
+            context,
+            tool="sqlite_query",
+            title="数据库写入权限",
+            detail=f"Agent 想执行写操作：\n数据库：{_display_path(target)}\nSQL：{query}",
+            action="sqlite_write",
+            path=str(target),
+            database=str(target),
+            query=query,
+        )
+        connection = sqlite3.connect(str(target))
+    else:
+        try:
+            connection = sqlite3.connect(target.as_uri() + "?mode=ro", uri=True)
+        except sqlite3.Error as exc:
+            raise RuntimeError(f"无法只读打开数据库：{exc}") from exc
+
+    try:
+        cursor = connection.execute(query, parameters)
+        if cursor.description:
+            columns = [item[0] for item in cursor.description]
+            rows = cursor.fetchmany(limit_rows + 1)
+            truncated = len(rows) > limit_rows
+            rows = rows[:limit_rows]
+            lines = [
+                f"数据库：{_display_path(target)}",
+                f"列：{' | '.join(columns)}",
+                f"返回 {len(rows)} 行" + ("（已截断）" if truncated else ""),
+            ]
+            for row in rows:
+                lines.append(" | ".join(_format_sql_value(value) for value in row))
+            return "\n".join(lines)
+        connection.commit()
+        return (
+            f"数据库：{_display_path(target)}\n"
+            f"语句已执行；影响行数：{cursor.rowcount}"
+        )
+    except sqlite3.Error as exc:
+        raise RuntimeError(f"SQL 执行失败：{exc}") from exc
+    finally:
+        connection.close()
+
+
+def _load_plan() -> dict:
+    if not PLAN_FILE.exists():
+        return {"items": [], "note": "", "updated_at": ""}
+    try:
+        data = json.loads(_read_text_file(PLAN_FILE))
+    except (ValueError, OSError):
+        return {"items": [], "note": "", "updated_at": ""}
+    if not isinstance(data, dict):
+        return {"items": [], "note": "", "updated_at": ""}
+    data.setdefault("items", [])
+    data.setdefault("note", "")
+    data.setdefault("updated_at", "")
+    return data
+
+
+def _dump_plan(data: dict) -> str:
+    if not data["items"]:
+        body = "（计划为空）"
+    else:
+        body = "\n".join(
+            f"{index}. [{'x' if item.get('done') else ' '}] {item.get('text', '')}"
+            for index, item in enumerate(data["items"], 1)
+        )
+    lines = [f"计划文件：{_display_path(PLAN_FILE)}", body]
+    if data.get("note"):
+        lines.append(f"备注：{data['note']}")
+    if data.get("updated_at"):
+        lines.append(f"更新时间：{data['updated_at']}")
+    return "\n".join(lines)
+
+
+def _normalize_plan_items(items: Any) -> list[dict]:
+    if not isinstance(items, list) or not items:
+        raise ValueError("items 必须是非空数组")
+    if len(items) > 50:
+        raise ValueError("计划最多 50 项")
+    normalized = []
+    for item in items:
+        done = False
+        text = item
+        if isinstance(item, dict):
+            text = item.get("text", "")
+            done = bool(item.get("done", False))
+        text = str(text).strip()
+        if not text:
+            raise ValueError("计划项不能为空")
+        if len(text) > 300:
+            raise ValueError("单个计划项不能超过 300 字")
+        normalized.append({"text": text, "done": done})
+    return normalized
+
+
+def plan(
+    action: str = "read",
+    items: list | None = None,
+    index: int = 0,
+    note: str = "",
+    *,
+    context: ToolContext | None = None,
+) -> str:
+    """读写持久化任务计划（workspace/.agent_plan.json）。"""
+    action = str(action or "read").strip().lower()
+    if action not in {"read", "write", "add", "done", "clear"}:
+        raise ValueError("action 必须是 read / write / add / done / clear")
+    data = _load_plan()
+    if action == "read":
+        return _dump_plan(data)
+
+    _request_permission(
+        context,
+        tool="plan",
+        title="计划写入权限",
+        detail=f"Agent 想{action}计划：\n{_display_path(PLAN_FILE)}",
+        action=f"plan_{action}",
+        path=str(PLAN_FILE),
+    )
+    if action == "clear":
+        PLAN_FILE.unlink(missing_ok=True)
+        return "计划已清空。"
+    if action == "write":
+        data["items"] = _normalize_plan_items(items)
+    elif action == "add":
+        data["items"] = list(data["items"]) + _normalize_plan_items(items)
+        if len(data["items"]) > 50:
+            raise ValueError("计划最多 50 项")
+    elif action == "done":
+        position = int(index or 0)
+        if not 1 <= position <= len(data["items"]):
+            raise ValueError(f"index 必须是 1-{len(data['items'])}")
+        data["items"][position - 1]["done"] = True
+    if note:
+        data["note"] = str(note)[:500]
+    data["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    PLAN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write_text(
+        PLAN_FILE, json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+    )
+    return _dump_plan(data)
+
+
+def governance_status(generations: int = 20, *, context: ToolContext | None = None) -> str:
+    """汇总自进化账本的用量与决策，并只报告密钥环境变量是否存在。"""
+    limit = max(1, min(int(generations or 20), 200))
+    entries: list[dict] = []
+    if LEDGER_FILE.exists():
+        for line in LEDGER_FILE.read_text(encoding="utf-8", errors="replace").splitlines():
+            try:
+                item = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(item, dict):
+                entries.append(item)
+    selected = entries[-limit:]
+    tokens = calls = 0
+    duration = 0.0
+    decisions: dict[str, int] = {}
+    for entry in selected:
+        agent = entry.get("agent") if isinstance(entry.get("agent"), dict) else {}
+        usage = entry.get("usage") or agent.get("usage") or {}
+        if isinstance(usage, dict):
+            try:
+                tokens += int(usage.get("total_tokens") or 0)
+            except (TypeError, ValueError):
+                pass
+        try:
+            calls += int(entry.get("llm_calls") or agent.get("llm_calls") or 0)
+        except (TypeError, ValueError):
+            pass
+        try:
+            duration += float(entry.get("duration_seconds") or 0)
+        except (TypeError, ValueError):
+            pass
+        decision = str(entry.get("decision") or "?")
+        decisions[decision] = decisions.get(decision, 0) + 1
+
+    lines = [
+        "== 自进化治理状态 ==",
+        f"账本：{LEDGER_FILE}",
+        f"总代数：{len(entries)}；统计最近 {len(selected)} 代",
+        f"Token：{tokens:,}；LLM 调用：{calls}；耗时：{duration / 60:.1f} 分钟",
+    ]
+    if selected:
+        last = selected[-1]
+        lines.append(
+            f"最近一代：#{last.get('generation', '?')} "
+            f"{last.get('decision', '?')}；{str(last.get('reason') or '')[:160]}"
+        )
+    if decisions:
+        lines.append(
+            "决策分布：" + "、".join(f"{key}={value}" for key, value in sorted(decisions.items()))
+        )
+    lines.append(
+        "授权模式：" + normalize_mode(getattr(context, "permission_mode", "ask"))
+    )
+
+    watched = [
+        "DEEPSEEK_API_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GITHUB_TOKEN",
+        "HF_TOKEN",
+        "TAVILY_API_KEY",
+    ]
+    present = [name for name in watched if os.environ.get(name)]
+    lines.append(
+        "环境变量（只报告是否存在，不显示值）："
+        + ("、".join(present) if present else "以上均未设置")
+    )
+    return "\n".join(lines)
+
+
+def sandbox_run(
+    command: str,
+    timeout: int = 60,
+    *,
+    context: ToolContext | None = None,
+) -> str:
+    """在临时空目录中运行命令，并清洗密钥类环境变量。非内核级隔离。"""
+    command = str(command or "").strip()
+    if not command:
+        raise ValueError("command 不能为空")
+    limit_timeout = max(1, min(int(timeout or 60), 300))
+    WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
+    sandbox_root = WORKSPACE_DIR / "sandbox"
+    sandbox_root.mkdir(parents=True, exist_ok=True)
+    workdir = Path(tempfile.mkdtemp(prefix="run-", dir=str(sandbox_root)))
+
+    _request_permission(
+        context,
+        tool="sandbox_run",
+        title="沙箱命令执行权限",
+        detail=f"Agent 想在临时目录执行命令：\n{workdir}\n\n命令：\n{command}",
+        action="sandbox_run",
+        command=command,
+        cwd=str(workdir),
+    )
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not SECRET_ENV_MARKERS.search(key)
+    }
+    env["PYTHONIOENCODING"] = "utf-8"
+    popen_kwargs: dict[str, Any] = {}
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        popen_kwargs["start_new_session"] = True
+
+    started = time.monotonic()
+    try:
+        process = subprocess.Popen(
+            _shell_argv(command),
+            cwd=str(workdir),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            **popen_kwargs,
+        )
+        timed_out = False
+        try:
+            stdout, stderr = process.communicate(timeout=limit_timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            _terminate_process(process)
+            stdout, stderr = process.communicate()
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+    elapsed = time.monotonic() - started
+
+    parts = [
+        "沙箱说明：命令在临时空目录运行，密钥类环境变量已清洗；",
+        "这是目录隔离 + 环境清洗，不是内核级安全沙箱。",
+        f"命令：{command}",
+    ]
+    if timed_out:
+        parts.append(f"ERROR: 命令超时（{limit_timeout} 秒），已终止")
+    else:
+        parts.append(f"退出码：{process.returncode}")
+    parts.append(f"耗时：{elapsed:.2f}s")
+    output_parts = []
+    if stdout:
+        output_parts.append("stdout:\n" + _decode_command_output(stdout).rstrip())
+    if stderr:
+        output_parts.append("stderr:\n" + _decode_command_output(stderr).rstrip())
+    parts.append("\n\n".join(output_parts) if output_parts else "（无输出）")
+    return "\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
 # 工具注册表
 # ---------------------------------------------------------------------------
 
@@ -3677,6 +4257,236 @@ TOOL_SPECS: dict[str, dict] = {
         },
         "context": True,
     },
+    "move_file": {
+        "description": "移动或重命名文件/目录。覆盖已有文件必须显式 overwrite=true；不能操作 .git、data、.env 等受保护路径。会请求授权。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "source": {"type": "string", "description": "源文件或目录路径"},
+                "destination": {"type": "string", "description": "目标路径"},
+                "overwrite": {
+                    "type": "boolean",
+                    "description": "目标已存在时是否覆盖，默认 false",
+                },
+            },
+            "required": ["source", "destination"],
+        },
+        "context": True,
+    },
+    "delete_file": {
+        "description": "删除文件，或删除目录（目录默认必须为空；recursive=true 才递归删除）。不能删除项目根目录及 .git、data、.env 等受保护路径。会请求授权。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "要删除的文件或目录"},
+                "recursive": {
+                    "type": "boolean",
+                    "description": "是否递归删除整个目录，默认 false",
+                },
+            },
+            "required": ["path"],
+        },
+        "context": True,
+    },
+    "project_overview": {
+        "description": "快速了解项目：按语言统计行数与体积、顶层目录布局、入口/构建文件、测试文件、最大的源码文件。开始陌生代码库时先看它，再决定读哪些文件。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "项目根目录，默认 ."},
+                "max_largest": {
+                    "type": "integer",
+                    "description": "列出多少个最大文件，1-30，默认 10",
+                },
+            },
+            "required": [],
+        },
+    },
+    "import_graph": {
+        "description": "用 AST 构建项目内部 Python 模块依赖图：列出依赖边、扇入/扇出最高的模块和循环依赖。适合评估改动影响范围、定位架构耦合。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "项目根目录，默认 ."},
+                "max_edges": {
+                    "type": "integer",
+                    "description": "最多列出多少条依赖边，10-300，默认 120",
+                },
+            },
+            "required": [],
+        },
+    },
+    "code_audit": {
+        "description": "对代码做本地审计。mode=syntax 编译检查；lint 查裸 except、可变默认参数、None 比较、超长函数/行；security 查 eval/exec、shell=True、硬编码密钥、不安全反序列化、TLS 关闭、SQL 拼接；deps 汇总声明依赖与第三方导入；review 合并以上。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "目录或单个文件，默认 ."},
+                "mode": {
+                    "type": "string",
+                    "enum": ["syntax", "lint", "security", "deps", "review"],
+                    "description": "审计模式，默认 review",
+                },
+                "max_items": {
+                    "type": "integer",
+                    "description": "最多显示多少条问题，1-200，默认 50",
+                },
+            },
+            "required": [],
+        },
+    },
+    "log_tail": {
+        "description": "读取日志文件最后 N 行，可按关键词过滤（不区分大小写）。排查测试失败、构建错误或运行日志时，比 read_file 更适合大日志。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "日志文件路径"},
+                "lines": {
+                    "type": "integer",
+                    "description": "显示最后多少行，1-500，默认 80",
+                },
+                "keyword": {
+                    "type": "string",
+                    "description": "可选关键词；只保留包含它的行",
+                },
+            },
+            "required": ["path"],
+        },
+    },
+    "run_build": {
+        "description": "检测并运行项目构建/编译命令：优先 package.json scripts，其次 Makefile、Cargo、Go，Python 项目回退到 compileall。dry_run=true 只报告将执行的命令。会请求授权。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "cwd": {"type": "string", "description": "项目目录，默认 ."},
+                "command": {
+                    "type": "string",
+                    "description": "可选：显式指定构建命令，省略则自动检测",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "description": "超时秒数，默认 300，最大 600",
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "只检测命令、不执行，默认 false",
+                },
+            },
+            "required": [],
+        },
+        "context": True,
+    },
+    "http_request": {
+        "description": "发送 HTTP 请求（GET/HEAD/OPTIONS/POST/PUT/PATCH/DELETE），读取 API 或提交数据。只允许公网 http/https；不自动跟随重定向。非只读方法会请求授权；返回内容按外部数据处理。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "完整 http/https URL"},
+                "method": {
+                    "type": "string",
+                    "description": "HTTP 方法，默认 GET",
+                },
+                "headers": {
+                    "type": "object",
+                    "description": "可选请求头对象，例如 {\"Content-Type\": \"application/json\"}",
+                },
+                "body": {
+                    "type": "string",
+                    "description": "可选请求体（字符串；JSON 请先序列化并设置 Content-Type）",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "description": "超时秒数，默认 30，最大 120",
+                },
+                "max_chars": {
+                    "type": "integer",
+                    "description": "最多返回多少字符，默认 4000",
+                },
+            },
+            "required": ["url"],
+        },
+        "context": True,
+    },
+    "sqlite_query": {
+        "description": "查询 SQLite 数据库。默认以只读模式打开，适合 SELECT/PRAGMA；写操作必须 allow_write=true 并请求授权。禁止 ATTACH/DETACH 与 load_extension。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "database": {"type": "string", "description": "数据库文件路径"},
+                "query": {"type": "string", "description": "单条 SQL 语句"},
+                "params": {
+                    "type": "array",
+                    "description": "可选参数数组，用 ? 占位符绑定，避免拼接",
+                },
+                "allow_write": {
+                    "type": "boolean",
+                    "description": "是否允许写操作，默认 false（只读）",
+                },
+                "max_rows": {
+                    "type": "integer",
+                    "description": "最多返回多少行，1-1000，默认 100",
+                },
+            },
+            "required": ["database", "query"],
+        },
+        "context": True,
+    },
+    "plan": {
+        "description": "维护跨轮次的持久任务计划。action=read 查看；write 用 items 覆盖；add 追加；done 用 index（1-based）标记完成；clear 清空。适合多步骤编码任务，避免忘记下一步。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["read", "write", "add", "done", "clear"],
+                    "description": "操作类型，默认 read",
+                },
+                "items": {
+                    "type": "array",
+                    "description": "write/add 时传入的计划项；元素是字符串或 {text, done}",
+                },
+                "index": {
+                    "type": "integer",
+                    "description": "done 时标记第几项完成（1-based）",
+                },
+                "note": {
+                    "type": "string",
+                    "description": "可选备注，最多 500 字",
+                },
+            },
+            "required": [],
+        },
+        "context": True,
+    },
+    "governance_status": {
+        "description": "查看自进化治理状态：最近若干代的 token/调用/耗时、接受与回滚分布、最近决策，以及关键密钥环境变量是否设置（只报告存在性，不显示值）。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "generations": {
+                    "type": "integer",
+                    "description": "统计最近多少代，1-200，默认 20",
+                }
+            },
+            "required": [],
+        },
+        "context": True,
+    },
+    "sandbox_run": {
+        "description": "在临时空目录运行命令，并清洗 KEY/TOKEN/SECRET/PASSWORD 等环境变量；结束后删除临时目录。适合验证不依赖项目文件的小脚本。注意：这是目录隔离+环境清洗，不是内核级安全沙箱。会请求授权。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "要执行的命令"},
+                "timeout": {
+                    "type": "integer",
+                    "description": "超时秒数，默认 60，最大 300",
+                },
+            },
+            "required": ["command"],
+        },
+        "context": True,
+    },
 }
 
 TOOL_FUNCS: dict[str, Callable[..., str]] = {
@@ -3692,10 +4502,22 @@ TOOL_FUNCS: dict[str, Callable[..., str]] = {
     "search_files": search_files,
     "repo_map": repo_map,
     "find_references": find_references,
+    "project_overview": project_overview,
+    "import_graph": import_graph,
+    "code_audit": code_audit,
+    "log_tail": log_tail,
     "apply_patch": apply_patch,
+    "move_file": move_file,
+    "delete_file": delete_file,
     "run_tests": run_tests,
+    "run_build": run_build,
     "git": git,
     "run_command": run_command,
+    "sandbox_run": sandbox_run,
+    "http_request": http_request,
+    "sqlite_query": sqlite_query,
+    "plan": plan,
+    "governance_status": governance_status,
     "remember": remember,
     "recall": recall,
 }
@@ -3711,8 +4533,6 @@ INTERNAL_ONLY_TOOLS = frozenset(
         "convert_units",
         "get_exchange_rate",
         "edit_file",
-        "move_file",
-        "delete_file",
         "search_memory",
         "forget",
     }
@@ -3789,7 +4609,7 @@ def run_tool(
         return f"ERROR: 工具 {name} 执行失败：{type(exc).__name__}: {exc}"
 
     text = str(result)
-    untrusted = name in {"web_search", "fetch_url"}
+    untrusted = name in {"web_search", "fetch_url", "http_request"}
     # 给外部内容留出边界标记的余量，避免截断把结束标记吃掉。
     inner_limit = MAX_OBSERVATION_CHARS - (80 if untrusted else 0)
     if len(text) > inner_limit:

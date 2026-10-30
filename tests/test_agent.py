@@ -188,7 +188,7 @@ class TestTools(unittest.TestCase):
         self.assertIn("未知工具", result)
 
         # 内部实现可以保留，但不能重新进入 Agent 的动作空间。
-        self.assertEqual(len(tools.TOOL_SPECS), 18)
+        self.assertEqual(len(tools.TOOL_SPECS), 30)
         self.assertFalse(tools.INTERNAL_ONLY_TOOLS & set(tools.TOOL_SPECS))
         self.assertFalse(tools.INTERNAL_ONLY_TOOLS & set(tools.TOOL_FUNCS))
         for removed in tools.INTERNAL_ONLY_TOOLS:

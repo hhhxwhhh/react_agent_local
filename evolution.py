@@ -963,7 +963,15 @@ def _bigram_overlap(a: str, b: str) -> float:
 # 每代结束后把轨迹压成指标、归因到具体组件，再把“改了什么、是否有效、
 # 在什么条件下可复用”写入 experience.jsonl，供后续几代选目标和写提示时参考。
 
-_WRITE_TOOLS = {"write_file", "edit_lines", "edit_file", "apply_patch"}
+_WRITE_TOOLS = {
+    "write_file",
+    "edit_lines",
+    "edit_file",
+    "apply_patch",
+    "move_file",
+    "delete_file",
+    "plan",
+}
 _COMPONENT_FILES: dict[str, tuple[str, ...]] = {
     "prompts": ("prompts.py",),
     "agent_loop": ("agent.py",),
