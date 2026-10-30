@@ -2245,16 +2245,12 @@ def write_file(
         path=str(target),
     )
 
-    # 语法护栏：.py 文件在落盘前校验最终文本（append 时校验已有内容+新内容）。
+    # 统一写盘入口：语法护栏 + 原子写 + 读历史失效。
     if append and target.exists():
-        check_python_syntax(target, _read_text_file(target) + text)
+        final_text = _read_text_file(target) + text
     else:
-        check_python_syntax(target, text)
-
-    target.parent.mkdir(parents=True, exist_ok=True)
-    with target.open("a" if append else "w", encoding="utf-8", newline="\n") as handle:
-        handle.write(text)
-    _forget_read_history(target)
+        final_text = text
+    _guarded_write_text(target, final_text, newline="\n")
 
     return (
         f"已{action}：{_display_path(target)}"
@@ -2310,9 +2306,7 @@ def edit_file(
 
     updated = match_text.replace(match_old, match_new, -1 if replace_all else 1)
     updated = _restore_newlines(updated, newline)
-    with target.open("w", encoding="utf-8", newline="") as handle:
-        handle.write(updated)
-    _forget_read_history(target)
+    _guarded_write_text(target, updated, newline="")
 
     return (
         f"已编辑：{_display_path(target)}"
@@ -2405,11 +2399,8 @@ def edit_lines(
         line_count=len(new_lines),
     )
 
-    # 语法护栏：.py 文件在落盘前校验最终文本，失败则不改盘。
-    check_python_syntax(target, text_out)
-
-    _atomic_write_text(target, text_out)
-    _forget_read_history(target)
+    # 统一写盘入口：语法护栏 + 原子写 + 读历史失效。
+    _guarded_write_text(target, text_out, newline=newline)
     return (
         f"已按行{mode}：{_display_path(target)}"
         f"（起始行 {start}，结束行 {end}，写入 {len(new_lines)} 行，"
@@ -2436,13 +2427,23 @@ def check_python_syntax(path: str | Path, text: str) -> None:
         ) from exc
 
 
-def _atomic_write_text(target: Path, text: str) -> None:
+def _guarded_write_text(target: Path, text: str, *, newline: str = "") -> None:
+    """统一写盘入口：语法护栏 + 原子写 + 读历史失效。
+
+    所有写盘路径都应经过这里，避免未来新增写工具漏加护栏。
+    """
+    check_python_syntax(target, text)
+    _atomic_write_text(target, text, newline=newline)
+    _forget_read_history(target)
+
+
+def _atomic_write_text(target: Path, text: str, *, newline: str = "") -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(
         dir=str(target.parent), prefix=f".{target.name}.", suffix=".tmp"
     )
     try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+        with os.fdopen(fd, "w", encoding="utf-8", newline=newline) as handle:
             handle.write(text)
         os.replace(temp_name, target)
     except Exception:
@@ -2542,9 +2543,10 @@ def apply_patch(
     written: list[Path] = []
     try:
         for path in changed:
-            _atomic_write_text(path, _restore_newlines(current[path], newlines[path]))
+            _guarded_write_text(
+                path, _restore_newlines(current[path], newlines[path]), newline=""
+            )
             written.append(path)
-            _forget_read_history(path)
     except Exception:
         # 多文件不是严格事务，但至少把已经写过的文件恢复原状。
         for path in written:
