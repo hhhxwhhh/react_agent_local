@@ -318,6 +318,38 @@ class TestEvolutionHelpers(unittest.TestCase):
         self.assertIn("incomplete_declared", diagnosis["failure_modes"])
         self.assertEqual(diagnosis["component"], "agent_loop")
 
+    def test_convergence_diagnosis_recommends_threshold(self):
+        blocked = [
+            {
+                "step": 1,
+                "tool": "git",
+                "input": {"operation": "status"},
+                "duplicate": True,
+                "observation": "重复调用",
+            },
+            {"step": 2, "tool": "read_file", "observation": "内容"},
+        ]
+        result = harness.classify_convergence_after_duplicate_block(blocked)
+        self.assertEqual(result["blocked"], 1)
+        self.assertEqual(result["converged"], 0)
+        self.assertEqual(result["recommended_threshold"], 2)
+
+        converged = [
+            blocked[0],
+            {"step": 2, "tool": "run_tests", "observation": "通过"},
+        ]
+        result = harness.classify_convergence_after_duplicate_block(converged)
+        self.assertEqual(result["converged"], 1)
+        self.assertEqual(result["recommended_threshold"], 3)
+
+        # 没有命中时也给出安全默认值 3。
+        self.assertEqual(
+            harness.classify_convergence_after_duplicate_block([])[
+                "recommended_threshold"
+            ],
+            3,
+        )
+
     def test_diagnose_false_observation_claim(self):
         record = {
             "generation": 21,

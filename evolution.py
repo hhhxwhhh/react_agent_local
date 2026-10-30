@@ -1799,6 +1799,17 @@ def _run_agent(
         default_scope="global",
         request_tool_permission=_make_permission_callback(args, permission_log),
     )
+    # 把上一代的收敛诊断接进本代运行时阈值：收敛率低时第 2 次重复即收口，
+    # 达标则保持 3。第 58 代只在 Agent 侧留了入口，这里负责真正注入。
+    try:
+        threshold = int(
+            harness.classify_convergence_after_duplicate_block(
+                _recent_trace()
+            ).get("recommended_threshold", 3)
+        )
+    except (TypeError, ValueError):
+        threshold = 3
+    os.environ["AGENT_MAX_REPEAT_TOTAL"] = str(max(2, threshold))
     agent = ReActAgent(
         llm=llm,
         max_steps=args.max_steps,

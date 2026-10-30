@@ -1103,6 +1103,18 @@ class TestLoopGuards(unittest.TestCase):
         self.assertEqual(agent.last_usage["total_tokens"], 15)
 
 
+    def test_repeat_total_threshold_from_env(self):
+        with patch.dict("os.environ", {"AGENT_MAX_REPEAT_TOTAL": "2"}):
+            agent = ReActAgent(
+                FakeLLM([]), max_steps=2, verbose=False, use_color=False
+            )
+        self.assertEqual(agent.max_repeat_total, 2)
+        with patch.dict("os.environ", {"AGENT_MAX_REPEAT_TOTAL": "oops"}):
+            agent = ReActAgent(
+                FakeLLM([]), max_steps=2, verbose=False, use_color=False
+            )
+        self.assertEqual(agent.max_repeat_total, agent_module.MAX_REPEAT_TOTAL)
+
     def test_false_empty_observation_claim_is_rejected_once(self):
         llm = FakeLLM(
             [
