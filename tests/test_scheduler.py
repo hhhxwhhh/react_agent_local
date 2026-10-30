@@ -33,6 +33,11 @@ class TestSchedulerBudget(unittest.TestCase):
         self.assertNotIn("--max-steps", cmd)
         self.assertNotIn("--max-diff-lines", cmd)
 
+    def test_task_flags_are_forwarded(self):
+        cmd = self._build_cmd(no_task_driven=True, task_max_attempts=3)
+        self.assertIn("--no-task-driven", cmd)
+        self.assertEqual(cmd[cmd.index("--task-max-attempts") + 1], "3")
+
     def test_once_mode_forwards_budget(self):
         with patch.object(scheduler, "_preflight", return_value=True), patch.object(
             scheduler, "_run_generation", return_value=0
@@ -40,7 +45,7 @@ class TestSchedulerBudget(unittest.TestCase):
             code = scheduler._run_once(io.StringIO(), 60, 1200)
         self.assertEqual(code, 0)
         run.assert_called_once()
-        self.assertEqual(run.call_args.args[1:], (60, 1200))
+        self.assertEqual(run.call_args.args[1:], (60, 1200, False, None))
 
     def test_parser_accepts_budget_flags(self):
         args = scheduler._build_parser().parse_args(["--max-steps", "60", "--max-diff-lines", "1200"])

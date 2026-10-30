@@ -20,6 +20,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -50,6 +51,8 @@ LEDGER_FILE = DATA_DIR / "ledger.jsonl"
 EXPERIENCE_FILE = DATA_DIR / "experience.jsonl"
 REJECTED_DIR = DATA_DIR / "rejected"
 GENERATION_LOG_DIR = DATA_DIR / "logs"
+TASKS_FILE = DATA_DIR / "tasks" / "tasks.json"
+TASK_ASSET_MARKERS = ("tasks/acceptance", "tasks\\acceptance", "tasks.json")
 TAG_PREFIX = "evo-gen-"
 
 # 这些路径由外层裁判保护；Agent 只能修改它们之外的文件。
@@ -1521,6 +1524,174 @@ def _diagnostic_proposals(record: dict[str, Any]) -> list[str]:
     ]
 
 
+def _read_tasks() -> list[dict[str, Any]]:
+    """读取维护者维护的任务队列；文件缺失时返回空列表。"""
+    try:
+        raw = TASKS_FILE.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return []
+    if isinstance(data, dict):
+        data = data.get("tasks", [])
+    if not isinstance(data, list):
+        return []
+    tasks: list[dict[str, Any]] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        task_id = str(item.get("id") or "").strip()
+        prompt = str(item.get("prompt") or "").strip()
+        if not task_id or not prompt:
+            continue
+        acceptance = item.get("acceptance") or []
+        if isinstance(acceptance, str):
+            acceptance = [acceptance]
+        elif isinstance(acceptance, (list, tuple)):
+            acceptance = list(acceptance)
+        else:
+            acceptance = []
+        commands = [str(command) for command in acceptance if str(command).strip()]
+        tasks.append(
+            {
+                "id": task_id,
+                "title": str(item.get("title") or task_id).strip(),
+                "prompt": prompt,
+                "acceptance": commands,
+                "max_attempts": int(item.get("max_attempts") or 0),
+                "difficulty": str(item.get("difficulty") or "").strip(),
+            }
+        )
+    return tasks
+
+
+def _task_progress() -> dict[str, list[dict[str, Any]]]:
+    """按任务 ID 汇总历史尝试（只算 accepted/rejected）。"""
+    progress: dict[str, list[dict[str, Any]]] = {}
+    for entry in _read_ledger():
+        task = entry.get("task")
+        if not isinstance(task, dict):
+            continue
+        task_id = str(task.get("id") or "").strip()
+        if not task_id:
+            continue
+        if entry.get("decision") not in {"accepted", "rejected"}:
+            continue
+        progress.setdefault(task_id, []).append(entry)
+    return progress
+
+
+def _task_is_solved(records: list[dict[str, Any]]) -> bool:
+    return any(entry.get("decision") == "accepted" for entry in records)
+
+
+def _select_task(max_attempts: int = 2) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """按队列顺序选第一个未完成且未耗尽次数的任务。"""
+    tasks = _read_tasks()
+    if not tasks:
+        return None, {"source": "none", "reason": "任务队列为空或不可读"}
+    progress = _task_progress()
+    skipped: list[dict[str, Any]] = []
+    for task in tasks:
+        records = progress.get(task["id"], [])
+        if _task_is_solved(records):
+            skipped.append({"id": task["id"], "reason": "solved"})
+            continue
+        limit = max(1, int(task.get("max_attempts") or max_attempts))
+        attempts = len(records)
+        if attempts >= limit:
+            skipped.append(
+                {"id": task["id"], "reason": "exhausted", "attempts": attempts}
+            )
+            continue
+        return task, {
+            "source": "task-queue",
+            "attempt": attempts + 1,
+            "max_attempts": limit,
+            "previous": records[-1] if records else None,
+            "skipped": skipped,
+        }
+    return None, {"source": "none", "reason": "所有任务已完成或已达最大尝试次数", "skipped": skipped}
+
+
+def _task_objective(task: dict[str, Any], info: dict[str, Any]) -> str:
+    lines = [
+        f"【编码任务 {task['id']}】{task.get('title') or ''}".strip(),
+        str(task.get("prompt") or "").strip(),
+        "",
+        (
+            f"这是第 {info.get('attempt', 1)}/{info.get('max_attempts', 1)} 次尝试。"
+            "Harness 会在全量测试通过后运行任务验收；验收不通过本代会被拒绝并回滚，"
+            "失败原因会进入下一代的经验。"
+        ),
+    ]
+    previous = info.get("previous")
+    if isinstance(previous, dict):
+        reason = _one_line(str(previous.get("reason") or ""), 300)
+        if reason:
+            lines.append(f"上一次尝试的结果：{reason}")
+        agent = previous.get("agent")
+        answer = ""
+        if isinstance(agent, dict):
+            answer = str(agent.get("final_answer") or "")
+        if answer:
+            lines.append("上一次尝试的教训：" + _one_line(answer, 300))
+    return "\n".join(lines)
+
+
+def _acceptance_argv(command: Any) -> list[str]:
+    if isinstance(command, (list, tuple)):
+        argv = [str(item) for item in command]
+    else:
+        argv = shlex.split(str(command or ""))
+    if argv and argv[0] in {"python", "python3", "py"}:
+        argv[0] = sys.executable
+    return argv
+
+
+def _run_task_acceptance(task: dict[str, Any], timeout: int) -> CheckResult:
+    """运行任务的验收命令；任何一条失败即视为未完成。"""
+    commands = task.get("acceptance") or []
+    if not commands:
+        return CheckResult(ok=False, output="任务没有配置验收命令", returncode=0)
+    outputs: list[str] = []
+    for command in commands:
+        argv = _acceptance_argv(command)
+        if not argv:
+            continue
+        try:
+            proc = _run(argv, cwd=ROOT, timeout=timeout)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            outputs.append(f"$ {' '.join(argv)}\n{type(exc).__name__}: {exc}")
+            return CheckResult(ok=False, output="\n".join(outputs), returncode=1)
+        outputs.append(
+            f"$ {' '.join(argv)}\n{proc.stdout}{proc.stderr}".strip()
+        )
+        if proc.returncode != 0:
+            return CheckResult(
+                ok=False,
+                output="\n".join(outputs),
+                returncode=proc.returncode,
+            )
+    return CheckResult(ok=True, output="\n".join(outputs), returncode=0)
+
+
+def _task_asset_access(trace: list[dict[str, Any]] | None) -> list[str]:
+    """检测 Agent 是否读取/运行了任务验收资源（作弊）。"""
+    hits: list[str] = []
+    for item in trace or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("tool") not in {"read_file", "run_command"}:
+            continue
+        payload = json.dumps(item.get("input"), ensure_ascii=False, default=str)
+        if any(marker in payload for marker in TASK_ASSET_MARKERS):
+            hits.append(str(item.get("tool")))
+    return hits
+
+
 def _auto_objective() -> tuple[str, dict[str, Any]]:
     """用上一代自己的复盘建议生成下一代目标；没有可用建议时返回空串。"""
     entries = [
@@ -1996,8 +2167,24 @@ def run_single_generation(args: argparse.Namespace) -> int:
         "source": "cli",
         "chosen": objective,
     }
+    task: dict[str, Any] | None = None
+    task_info: dict[str, Any] = {}
+    if not objective and not getattr(args, "no_task_driven", False):
+        # 优先做具体编码任务：任务队列里第一个未完成且没耗尽次数的任务。
+        task, task_info = _select_task(int(getattr(args, "task_max_attempts", 2)))
+        if task is not None:
+            objective = _task_objective(task, task_info)
+            objective_info = {
+                "source": "task-queue",
+                "task": task["id"],
+                "attempt": task_info.get("attempt"),
+                "max_attempts": task_info.get("max_attempts"),
+                "chosen": objective,
+            }
+        else:
+            print(f"[harness] 任务队列不可用：{task_info.get('reason')}")
     if not objective:
-        # 默认不人工指定目标：直接采用上一代复盘里的第一条可执行建议。
+        # 任务队列为空/耗尽时，退回上一代复盘里的第一条可执行建议。
         objective, objective_info = _auto_objective()
     if not objective:
         objective = harness.default_objective()
@@ -2009,6 +2196,17 @@ def run_single_generation(args: argparse.Namespace) -> int:
         "model": args.model,
         "objective": objective,
         "objective_source": objective_info,
+        "task": (
+            {
+                "id": task["id"],
+                "title": task["title"],
+                "attempt": task_info.get("attempt"),
+                "max_attempts": task_info.get("max_attempts"),
+                "acceptance": task.get("acceptance") or [],
+            }
+            if task is not None
+            else {"id": None, "reason": task_info.get("reason") if task_info else ""}
+        ),
         "baseline": {},
         "candidate": {},
         "agent": {"permissions": []},
@@ -2020,6 +2218,11 @@ def run_single_generation(args: argparse.Namespace) -> int:
     print(f"\n{'=' * 64}")
     print(f"自进化第 {generation} 代")
     print(f"目标来源：{objective_info.get('source', 'cli')}")
+    if task is not None:
+        print(
+            f"任务：{task['id']}（第 {task_info.get('attempt')}/"
+            f"{task_info.get('max_attempts')} 次尝试）"
+        )
     print(f"目标：{_one_line(objective, 120)}")
     print(f"{'=' * 64}")
 
@@ -2099,6 +2302,8 @@ def run_single_generation(args: argparse.Namespace) -> int:
             history=history_text,
             experience=experience_text,
             trace=_recent_trace(),
+            task=task,
+            task_attempt=task_info,
         )
         permission_log: list[dict[str, Any]] = record["agent"]["permissions"]
         log_path = GENERATION_LOG_DIR / f"gen-{generation:03d}.log"
@@ -2150,6 +2355,19 @@ def run_single_generation(args: argparse.Namespace) -> int:
             }
         )
 
+        cheat_hits = _task_asset_access(trace)
+        if cheat_hits:
+            _reject(
+                root=ROOT,
+                baseline=baseline_commit,
+                generation=generation,
+                record=record,
+                reason=(
+                    "Agent 读取或运行了冻结的任务验收资源"
+                    f"（{', '.join(sorted(set(cheat_hits)))}）；本代任务作废"
+                ),
+            )
+            return 0
         if _current_branch(ROOT) != baseline_branch:
             _reject(
                 root=ROOT,
@@ -2282,6 +2500,26 @@ def run_single_generation(args: argparse.Namespace) -> int:
             )
             return 0
 
+        if task is not None:
+            task_check = _run_task_acceptance(task, args.test_timeout)
+            record["candidate"]["task_acceptance"] = task_check.as_dict()
+            print(
+                f"[harness] 任务验收：{'通过' if task_check.ok else '未通过'}"
+                f"（{task['id']}）"
+            )
+            if not task_check.ok:
+                _reject(
+                    root=ROOT,
+                    baseline=baseline_commit,
+                    generation=generation,
+                    record=record,
+                    reason=(
+                        f"任务 {task['id']} 验收未通过："
+                        + _one_line(task_check.output[-800:], 400)
+                    ),
+                )
+                return 0
+
         candidate_eval, candidate_score = run_eval_command(
             args.eval_command, ROOT, args.eval_timeout
         )
@@ -2324,6 +2562,8 @@ def run_single_generation(args: argparse.Namespace) -> int:
         )
         record["decision"] = "accepted"
         record["reason"] = "测试、安全检查、路径边界和改动预算全部通过"
+        if task is not None:
+            record["task"]["solved"] = True
         record["candidate"].update({"commit": candidate_commit, "tag": tag})
         print(
             f"[harness] 接受第 {generation} 代：{candidate_commit[:12]} "
@@ -2412,7 +2652,11 @@ def _supervisor(args: argparse.Namespace) -> int:
             str(args.min_delta),
             "--objective",
             args.objective,
+            "--task-max-attempts",
+            str(args.task_max_attempts),
         ]
+        if args.no_task_driven:
+            argv.append("--no-task-driven")
         if args.eval_command:
             argv += ["--eval-command", args.eval_command]
         if args.yes:
@@ -2548,6 +2792,17 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="自动允许 Agent 的文件/测试操作；仍拒绝自行 commit/tag/checkout 和破坏性命令",
     )
+    parser.add_argument(
+        "--no-task-driven",
+        action="store_true",
+        help="忽略任务队列，改用上一代复盘自动生成目标",
+    )
+    parser.add_argument(
+        "--task-max-attempts",
+        type=int,
+        default=2,
+        help="任务未在 tasks.json 单独配置时，每个任务最多尝试几代",
+    )
     parser.add_argument("--no-color", action="store_true")
     parser.add_argument("--status", action="store_true", help="查看历史记录")
     parser.add_argument(
@@ -2577,6 +2832,7 @@ def main(argv: list[str] | None = None) -> int:
     args.max_diff_lines = max(10, int(args.max_diff_lines))
     args.test_timeout = max(30, int(args.test_timeout))
     args.eval_timeout = max(30, int(args.eval_timeout))
+    args.task_max_attempts = max(1, int(args.task_max_attempts))
 
     if args.generations > 1 and not args.once:
         return _supervisor(args)

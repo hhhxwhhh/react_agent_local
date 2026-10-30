@@ -167,7 +167,13 @@ def _ledger_entries() -> list[dict]:
     return entries
 
 
-def _run_generation(log, max_steps: int | None = None, max_diff_lines: int | None = None) -> int:
+def _run_generation(
+    log,
+    max_steps: int | None = None,
+    max_diff_lines: int | None = None,
+    no_task_driven: bool = False,
+    task_max_attempts: int | None = None,
+) -> int:
     cmd = [
         sys.executable,
         "-X",
@@ -184,6 +190,10 @@ def _run_generation(log, max_steps: int | None = None, max_diff_lines: int | Non
         cmd += ["--max-steps", str(max_steps)]
     if max_diff_lines is not None:
         cmd += ["--max-diff-lines", str(max_diff_lines)]
+    if no_task_driven:
+        cmd.append("--no-task-driven")
+    if task_max_attempts is not None:
+        cmd += ["--task-max-attempts", str(task_max_attempts)]
     env = dict(os.environ)
     env["PYTHONIOENCODING"] = "utf-8"
     # 计划任务的 PATH 可能比交互式终端短；显式补上当前解释器目录，
@@ -222,11 +232,19 @@ def _log_new_entries(log, before: int) -> None:
         _log(log, f"第 {generation} 代：{decision}；{reason}")
 
 
-def _run_once(log, max_steps: int | None = None, max_diff_lines: int | None = None) -> int:
+def _run_once(
+    log,
+    max_steps: int | None = None,
+    max_diff_lines: int | None = None,
+    no_task_driven: bool = False,
+    task_max_attempts: int | None = None,
+) -> int:
     if not _preflight(log):
         return 2
     before = len(_ledger_entries())
-    returncode = _run_generation(log, max_steps, max_diff_lines)
+    returncode = _run_generation(
+        log, max_steps, max_diff_lines, no_task_driven, task_max_attempts
+    )
     _log_new_entries(log, before)
     return 0 if returncode == 0 else returncode
 
@@ -268,7 +286,13 @@ def _run_window(args, log) -> int:
 
         _log(log, f"开始第 {completed + 1}/{args.max_generations} 代。")
         before = len(_ledger_entries())
-        returncode = _run_generation(log, args.max_steps, args.max_diff_lines)
+        returncode = _run_generation(
+            log,
+            args.max_steps,
+            args.max_diff_lines,
+            args.no_task_driven,
+            args.task_max_attempts,
+        )
         _log_new_entries(log, before)
         if returncode != 0:
             _log(log, f"evolution.py 返回 {returncode}，停止本日调度。")
@@ -317,6 +341,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="每代最大改动行数（透传 evolution.py；默认用 config.py 的值）",
     )
     parser.add_argument(
+        "--no-task-driven",
+        action="store_true",
+        help="关闭任务队列驱动，改为上一代复盘自动生成目标",
+    )
+    parser.add_argument(
+        "--task-max-attempts",
+        type=int,
+        default=None,
+        help="每个编码任务最多尝试几代（默认用 evolution.py 的 2）",
+    )
+    parser.add_argument(
         "--once",
         action="store_true",
         help="立即运行一代并退出，不等待时间窗口（用于手动验证）",
@@ -350,6 +385,8 @@ def main(argv: list[str] | None = None) -> int:
         args.max_steps = max(5, int(args.max_steps))
     if args.max_diff_lines is not None:
         args.max_diff_lines = max(10, int(args.max_diff_lines))
+    if args.task_max_attempts is not None:
+        args.task_max_attempts = max(1, int(args.task_max_attempts))
 
     SCHEDULER_DIR.mkdir(parents=True, exist_ok=True)
     log_path = SCHEDULER_DIR / f"{datetime.now():%Y-%m-%d}.log"
@@ -375,7 +412,13 @@ def main(argv: list[str] | None = None) -> int:
                 return 0 if ok else 2
             if args.once:
                 _log(log, "手动模式：立即运行一代。")
-                return _run_once(log, args.max_steps, args.max_diff_lines)
+                return _run_once(
+                    log,
+                    args.max_steps,
+                    args.max_diff_lines,
+                    args.no_task_driven,
+                    args.task_max_attempts,
+                )
             return _run_window(args, log)
         finally:
             _release_lock()

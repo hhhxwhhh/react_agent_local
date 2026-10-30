@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 import tempfile
 import unittest
@@ -14,6 +15,131 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import evolution  # noqa: E402
 import harness  # noqa: E402
+
+
+class TestTaskDrivenEvolution(unittest.TestCase):
+    def _tasks_file(self, tasks) -> Path:
+        directory = tempfile.mkdtemp(prefix="tasks_")
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = Path(directory) / "tasks.json"
+        path.write_text(json.dumps({"tasks": tasks}, ensure_ascii=False), encoding="utf-8")
+        return path
+
+    def test_read_tasks_normalizes_entries(self):
+        path = self._tasks_file(
+            [
+                {
+                    "id": "01-x",
+                    "title": "X",
+                    "prompt": "do x",
+                    "acceptance": "python check.py 01",
+                    "max_attempts": 3,
+                },
+                {"id": "", "prompt": "missing id"},
+                {"id": "02-y", "prompt": "do y", "acceptance": ["a", ""]},
+            ]
+        )
+        with patch.object(evolution, "TASKS_FILE", path):
+            tasks = evolution._read_tasks()
+        self.assertEqual([task["id"] for task in tasks], ["01-x", "02-y"])
+        self.assertEqual(tasks[0]["acceptance"], ["python check.py 01"])
+        self.assertEqual(tasks[0]["max_attempts"], 3)
+        self.assertEqual(tasks[1]["acceptance"], ["a"])
+
+    def test_select_task_skips_solved_and_exhausted(self):
+        tasks = [
+            {"id": "01", "title": "a", "prompt": "a", "acceptance": [], "max_attempts": 2},
+            {"id": "02", "title": "b", "prompt": "b", "acceptance": [], "max_attempts": 1},
+            {"id": "03", "title": "c", "prompt": "c", "acceptance": [], "max_attempts": 2},
+        ]
+        progress = {
+            "01": [{"decision": "accepted"}],
+            "02": [{"decision": "rejected", "reason": "失败了"}],
+            "03": [{"decision": "rejected", "reason": "第一次没做完"}],
+        }
+        with patch.object(evolution, "_read_tasks", return_value=tasks), patch.object(
+            evolution, "_task_progress", return_value=progress
+        ):
+            task, info = evolution._select_task()
+        self.assertEqual(task["id"], "03")
+        self.assertEqual(info["attempt"], 2)
+        self.assertEqual(info["max_attempts"], 2)
+        self.assertEqual(info["previous"]["reason"], "第一次没做完")
+
+    def test_select_task_returns_none_when_all_done(self):
+        tasks = [
+            {"id": "01", "title": "a", "prompt": "a", "acceptance": [], "max_attempts": 1}
+        ]
+        with patch.object(evolution, "_read_tasks", return_value=tasks), patch.object(
+            evolution, "_task_progress", return_value={"01": [{"decision": "accepted"}]}
+        ):
+            task, info = evolution._select_task()
+        self.assertIsNone(task)
+        self.assertIn("所有任务", info["reason"])
+
+    def test_task_objective_includes_attempt_and_previous_lesson(self):
+        task = {"id": "01", "title": "改名工具", "prompt": "实现 rename_symbol"}
+        info = {
+            "attempt": 2,
+            "max_attempts": 2,
+            "previous": {
+                "reason": "任务 01 验收未通过",
+                "agent": {"final_answer": "dry_run 分支没写"},
+            },
+        }
+        text = evolution._task_objective(task, info)
+        self.assertIn("01", text)
+        self.assertIn("实现 rename_symbol", text)
+        self.assertIn("第 2/2 次", text)
+        self.assertIn("验收未通过", text)
+        self.assertIn("dry_run 分支没写", text)
+
+    def test_task_asset_access_detects_cheating(self):
+        trace = [
+            {"tool": "read_file", "input": {"path": "data/evolution/tasks/acceptance/check.py"}},
+            {"tool": "run_command", "input": {"command": "python data/evolution/tasks/acceptance/check.py 01"}},
+            {"tool": "read_file", "input": {"path": "agent.py"}},
+            {"tool": "search_files", "input": {"keyword": "rename_symbol"}},
+        ]
+        hits = evolution._task_asset_access(trace)
+        self.assertEqual(sorted(hits), ["read_file", "run_command"])
+
+    def test_acceptance_argv_replaces_python(self):
+        argv = evolution._acceptance_argv("python -X utf8 check.py 01")
+        self.assertEqual(argv[0], sys.executable)
+        self.assertEqual(argv[1:], ["-X", "utf8", "check.py", "01"])
+        self.assertEqual(
+            evolution._acceptance_argv([sys.executable, "-c", "print(1)"]),
+            [sys.executable, "-c", "print(1)"],
+        )
+
+    def test_run_task_acceptance_reports_failure(self):
+        ok = evolution._run_task_acceptance(
+            {"acceptance": [[sys.executable, "-c", "print('ok')"]]}, timeout=30
+        )
+        self.assertTrue(ok.ok)
+        self.assertIn("ok", ok.output)
+        bad = evolution._run_task_acceptance(
+            {"acceptance": [[sys.executable, "-c", "raise SystemExit(3)"]]}, timeout=30
+        )
+        self.assertFalse(bad.ok)
+        self.assertEqual(bad.returncode, 3)
+
+    def test_question_includes_task_block(self):
+        question = harness.build_generation_question(
+            generation=1,
+            objective="做任务",
+            baseline_commit="abc1234",
+            max_diff_lines=600,
+            protected_paths=["data/"],
+            task={"id": "01", "title": "改名工具", "prompt": "实现 rename_symbol"},
+            task_attempt={"attempt": 1, "max_attempts": 2},
+        )
+        self.assertIn("本代具体编码任务", question)
+        self.assertIn("01", question)
+        self.assertIn("实现 rename_symbol", question)
+        self.assertIn("冻结裁判资源", question)
+        self.assertIn("第 1 / 2 次", question)
 
 
 class TestEvolutionHelpers(unittest.TestCase):

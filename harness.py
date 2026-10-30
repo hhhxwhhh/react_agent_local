@@ -490,6 +490,8 @@ def build_generation_question(
     experience: str = "",
     tool_failures: list[str] | None = None,
     trace: list[dict] | None = None,
+    task: dict | None = None,
+    task_attempt: dict | None = None,
 ) -> str:
     """构造交给当前 Agent 的下一代开发任务。
 
@@ -497,6 +499,22 @@ def build_generation_question(
     这样冻结的旧版裁判仍能调用。
     """
     target = str(objective or "").strip() or DEFAULT_OBJECTIVE
+    task_block = ""
+    if isinstance(task, dict) and task.get("prompt"):
+        attempt = task_attempt if isinstance(task_attempt, dict) else {}
+        task_block = (
+            "\n## 本代具体编码任务（最高优先级）\n"
+            f"- 任务 ID：{task.get('id')}\n"
+            f"- 标题：{task.get('title')}\n"
+            f"- 尝试次数：第 {attempt.get('attempt', 1)} / "
+            f"{attempt.get('max_attempts', 1)} 次\n"
+            f"- 任务要求：\n{task.get('prompt')}\n"
+            "- 验收方式：Harness 会在候选全量测试通过后运行冻结的验收脚本；"
+            "验收不过本代会被拒绝并回滚，失败原因会进入下一代经验。\n"
+            "- 任务验收脚本和 tasks.json 是冻结裁判资源：不要 read_file，也不要"
+            "用 run_command 运行或查看它们；按任务描述实现通用行为，不要针对"
+            "验收样例硬编码。\n"
+        )
     protected = "、".join(str(item) for item in protected_paths if str(item).strip())
     history_text = str(history or "").strip() or "（暂无历史记录；这是第一次自进化。）"
     experience_text = str(experience or "").strip()
@@ -550,7 +568,7 @@ def build_generation_question(
 
 ## 长期目标（所有代共同朝这个方向）
 {LONG_TERM_GOAL}
-
+{task_block}
 ## 当前基线
 - 仓库根目录：当前工作目录
 - 基线提交：{baseline_commit}
