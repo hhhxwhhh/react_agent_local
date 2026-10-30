@@ -340,7 +340,9 @@ def _read_usage(path: Path) -> dict[str, int] | None:
     }
 
 
-def _agent_env(workspace: Path, usage_file: Path) -> dict[str, str]:
+def _agent_env(
+    workspace: Path, usage_file: Path, disabled_tools: list[str] | None = None
+) -> dict[str, str]:
     env = os.environ.copy()
     for key in SECRET_ENV_KEYS:
         env.pop(key, None)
@@ -356,6 +358,10 @@ def _agent_env(workspace: Path, usage_file: Path) -> dict[str, str]:
             "NO_COLOR": "1",
         }
     )
+    if disabled_tools:
+        env["AGENT_DISABLED_TOOLS"] = ",".join(disabled_tools)
+    else:
+        env.pop("AGENT_DISABLED_TOOLS", None)
     return env
 
 
@@ -369,6 +375,7 @@ def run_agent(
     usage_file: Path,
     agent_root: Path = ROOT,
     temperature: float = 0.0,
+    disabled_tools: list[str] | None = None,
 ) -> dict[str, Any]:
     command = [
         sys.executable,
@@ -388,7 +395,7 @@ def run_agent(
         "--usage-json",
         str(usage_file),
     ]
-    env = _agent_env(workspace, usage_file)
+    env = _agent_env(workspace, usage_file, disabled_tools)
     started = time.monotonic()
     creationflags = 0
     if os.name == "nt":
@@ -522,6 +529,7 @@ def run_task(
                 usage_file=usage_file,
                 agent_root=Path(args.agent_root).expanduser().resolve(),
                 temperature=args.temperature,
+                disabled_tools=args.disabled_tools,
             )
             after = hash_tree(workspace)
             changed = diff_tree(before, after)
@@ -552,6 +560,7 @@ def run_task(
             "model": args.model,
             "temperature": args.temperature,
             "agent_root": args.agent_root,
+            "disabled_tools": args.disabled_tools,
             "timestamp": timestamp,
             "success": False,
             "workspace": str(workspace) if args.keep else "",
@@ -645,6 +654,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=str(ROOT),
         help="要评测的 Agent 代码根目录（可用 git worktree 指向历史版本）",
     )
+    parser.add_argument(
+        "--disable-tools",
+        default="",
+        help="逗号分隔的工具名；用于工具消融实验，例如 run_tests,apply_patch",
+    )
     return parser
 
 
@@ -659,6 +673,9 @@ def main(argv: list[str] | None = None) -> int:
     if not (agent_root / "agent.py").is_file():
         raise SystemExit(f"--agent-root 下找不到 agent.py：{agent_root}")
     args.agent_root = str(agent_root)
+    args.disabled_tools = [
+        name.strip() for name in str(args.disable_tools or "").split(",") if name.strip()
+    ]
     tasks = select_tasks(args.tasks)
     if args.list:
         for task in tasks:
