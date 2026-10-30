@@ -1,0 +1,12 @@
+{
+  "id": "11-date-range-inclusive",
+  "title": "让日期范围包含结束日期",
+  "category": "bugfix",
+  "difficulty": "easy",
+  "max_steps": 16,
+  "timeout_seconds": 240,
+  "test_timeout_seconds": 120,
+  "hidden": "hidden/test_11_date_range_inclusive_hidden.py",
+  "reference": "reference/",
+  "prompt": "修复 daterange.py 的 date_range(start, end)：返回包含 start 和 end 在内的所有日期，start > end 时抛 ValueError。只处理 datetime.date 语义，每次递增一天。不要修改 tests/ 下已有测试。完成后运行测试。"
+}

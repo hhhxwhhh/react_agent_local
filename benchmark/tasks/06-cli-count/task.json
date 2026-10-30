@@ -1,0 +1,12 @@
+{
+  "id": "06-cli-count",
+  "title": "为单词计数 CLI 增加 lines/chars 模式",
+  "category": "feature",
+  "difficulty": "medium",
+  "max_steps": 20,
+  "timeout_seconds": 240,
+  "test_timeout_seconds": 120,
+  "hidden": "hidden/test_06_cli_count_hidden.py",
+  "reference": "reference/",
+  "prompt": "完善 wordcount.py 的命令行接口：新增 --count {words,lines,chars}，默认 words。words 用 text.split() 计数；lines 用 text.splitlines() 计数（末尾换行不额外算一行）；chars 返回 len(text)（包含换行）。文件不存在或读取失败时向 stderr 打印以“错误:”开头的消息，并让 main 返回 2。不要修改 tests/ 下已有测试。完成后运行测试。"
+}

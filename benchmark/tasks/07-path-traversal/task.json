@@ -1,0 +1,12 @@
+{
+  "id": "07-path-traversal",
+  "title": "阻止笔记读取的路径穿越",
+  "category": "security",
+  "difficulty": "medium",
+  "max_steps": 22,
+  "timeout_seconds": 300,
+  "test_timeout_seconds": 120,
+  "hidden": "hidden/test_07_path_traversal_hidden.py",
+  "reference": "reference/",
+  "prompt": "修复 safe_files.py 的 read_note(name)，只允许读取 notes 目录内的文件。拒绝绝对路径和任何解析后逃出 notes 目录的路径（包括 .. 和符号链接），抛出 ValueError且消息包含“非法路径”；允许 notes 下的子目录。文件不存在时自然抛出 FileNotFoundError。不要修改 tests/ 下已有测试。完成后运行测试。"
+}

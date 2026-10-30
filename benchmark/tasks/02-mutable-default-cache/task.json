@@ -1,0 +1,12 @@
+{
+  "id": "02-mutable-default-cache",
+  "title": "修复可变默认参数导致的跨调用污染",
+  "category": "bugfix",
+  "difficulty": "easy",
+  "max_steps": 16,
+  "timeout_seconds": 240,
+  "test_timeout_seconds": 120,
+  "hidden": "hidden/test_02_mutable_default_cache_hidden.py",
+  "reference": "reference/",
+  "prompt": "修复 bucket.py 的 add_item(item, bucket=[])。不传 bucket 时，每次调用都必须使用新的空列表；显式传入列表时仍在该列表上追加并返回它。不要修改 tests/ 下已有测试。完成后运行测试。"
+}

@@ -1,0 +1,12 @@
+{
+  "id": "14-user-validation",
+  "title": "为用户创建加上字段校验",
+  "category": "feature",
+  "difficulty": "medium",
+  "max_steps": 20,
+  "timeout_seconds": 240,
+  "test_timeout_seconds": 120,
+  "hidden": "hidden/test_14_user_validation_hidden.py",
+  "reference": "reference/",
+  "prompt": "完善 users.py 的 create_user(data)：校验 username、email、age。username 必须是 3-20 位字母/数字/下划线；email 必须包含一个 @ 和至少一个点；age 必须是 0-150 的整数（bool 不算）。任一字段缺失或非法都抛 ValueError，消息包含字段名；全部合法时返回只含这三个键的 dict（值保持原样）。不要修改 tests/ 下已有测试。完成后运行测试。"
+}

@@ -1,0 +1,12 @@
+{
+  "id": "13-binary-search-boundary",
+  "title": "修复 lower_bound 的边界返回值",
+  "category": "bugfix",
+  "difficulty": "medium",
+  "max_steps": 20,
+  "timeout_seconds": 240,
+  "test_timeout_seconds": 120,
+  "hidden": "hidden/test_13_binary_search_boundary_hidden.py",
+  "reference": "reference/",
+  "prompt": "修复 search.py 的 lower_bound(nums, target)：返回第一个满足 nums[i] >= target 的下标，不存在时返回 len(nums)；空列表返回 0。假设 nums 已升序，允许重复元素。不要修改 tests/ 下已有测试。完成后运行测试。"
+}

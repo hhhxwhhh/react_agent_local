@@ -17,3 +17,8 @@ venv/
 workspace/*
 !workspace/notes/
 !workspace/notes/**
+
+# Benchmark 运行产物：保留 .gitkeep，结果本地留存
+benchmark/results/*.json
+benchmark/workspaces/
+benchmark/.work/

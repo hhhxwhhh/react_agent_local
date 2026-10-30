@@ -92,9 +92,12 @@ SEMANTIC_RERANK_MIN_ENTRIES=6
 LOCATION_PERMISSION_TIMEOUT=90
 
 # 文件与命令执行（默认允许访问本机任意路径）
-# unrestricted：绝对路径均可访问；workspace：退回旧的文件沙箱
+# unrestricted：绝对路径均可访问；root：限制在 FILE_ROOT 子树；
+# workspace：退回旧的 workspace/ 文件沙箱
 FILE_ACCESS_MODE=unrestricted
 # FILE_ROOT=             # 相对路径的基准目录，默认项目根目录
+# 基准测试用独立记忆文件隔离长期记忆（默认 data/memory.json）
+# AGENT_MEMORY_FILE=
 # 工具授权：ask 每步询问；edits 自动接受项目内编辑和只读命令；
 # auto 项目内自动放行并拒绝明显危险命令；readonly 拒绝所有写操作
 REQUIRE_TOOL_APPROVAL=true
@@ -213,6 +216,8 @@ python agent.py "重构 demo/ 下的脚本并运行测试"
 python agent.py --permission-mode ask "重构 demo/ 下的脚本并运行测试"
 # 完全跳过授权策略（高风险）
 python agent.py --yes "重构 demo/ 下的脚本并运行测试"
+# 把本轮 token 用量写成 JSON，供脚本/基准测试读取
+python agent.py --usage-json usage.json "运行测试并修复失败"
 ```
 
 `auto` 模式下，项目内路径直接放行；项目外路径、Git 写操作等按策略决定是否
@@ -277,6 +282,28 @@ python evolution.py --generations 3 --yes \
 回归”信号；要证明开放任务能力变强，仍建议接入自己的 held-out 任务集。
 
 注意：Harness 要求工作区干净，且不会自动 push。
+
+### 3.4 Held-out 编码基准
+
+自进化的日常验收只能证明“没退化”，不能证明“变强了”。`benchmark/` 提供一套
+Agent 进化时看不到的固定任务：15 个小型 Python 仓库，每个都有可见测试、隐藏
+测试和人工参考解。运行器在临时工作区里启动 Agent，隐藏测试只在 Agent 退出后
+才安装；改写已有可见测试会被判为篡改。
+
+```bash
+# 不调用模型，先验证参考解（CI/改题后必跑）
+python -X utf8 benchmark/runner.py --all --reference
+
+# 跑全部任务；单任务用 01、02 这样的前缀
+python -X utf8 benchmark/runner.py --all
+
+# 汇总最新结果与自进化历史
+python -X utf8 benchmark/metrics.py
+```
+
+任务格式、隔离边界、指标口径和新增任务的方法见
+[benchmark/README.md](benchmark/README.md)。这是进程级和文件工具级隔离，
+不是内核级沙箱；强隔离请使用 `benchmark/Dockerfile`。
 
 ---
 
@@ -384,8 +411,11 @@ Question ───────>│  DeepSeek（system + scratchpad）│
   最多扫描 500 个文件；
 - 覆盖文件前，提示词要求模型先用 `read_file` 查看原内容；修改优先用
   `apply_patch`，不要用 `write_file` 重写整个文件；
+- `FILE_ACCESS_MODE=root` 时，所有路径必须位于 `FILE_ROOT` 子树内，`../`、
+  外部绝对路径和符号链接逃逸都会被拒绝；基准测试用这个模式把 Agent 关进临时
+  工作区；
 - 需要恢复旧行为时设置 `FILE_ACCESS_MODE=workspace`，此时所有路径必须位于
-  项目下的 `workspace/`，`../`、外部绝对路径和符号链接逃逸都会被拒绝。
+  项目下的 `workspace/`。
 
 `run_command` 会在本机执行 shell 命令：
 
@@ -633,8 +663,9 @@ react_agent/
 ├── permissions.py      # 分级授权策略：ask/edits/auto/readonly
 ├── llm.py              # DeepSeek Chat Completions 客户端（含重试）
 ├── prompts.py          # ReAct 系统提示词（含记忆与工具安全规则）
-├── tools.py            # 15 个注册工具 + 内部工具实现与注册表
+├── tools.py            # 30 个注册工具 + 内部工具实现与注册表
 ├── evaluation.py       # 固定离线行为评测（自进化的默认评分信号）
+├── benchmark/          # Held-out 编码基准：任务、运行器、指标、Dockerfile
 ├── config.py           # .env / 环境变量加载
 ├── harness.py          # 可进化的自进化元策略（目标与下一代提示词）
 ├── evolution.py        # 不可进化的裁判：基线/验证/提交/回滚/分代记录
@@ -658,7 +689,8 @@ react_agent/
 │   ├── test_memory.py       # 并发、TTL、容量、上下文预算、迁移
 │   ├── test_sessions.py     # 会话、分层记忆、Web API
 │   ├── test_vector_memory.py # 向量检索、关键词兜底、位置与地理查询工具
-│   └── test_evolution.py    # 自进化裁判、历史注入、离线评测、沙箱安全检查
+│   ├── test_evolution.py    # 自进化裁判、历史注入、离线评测、沙箱安全检查
+│   └── test_benchmark.py    # 基准任务加载、参考解、篡改检测、指标聚合
 ├── requirements.txt
 ├── .env.example
 └── README.md
@@ -668,7 +700,7 @@ react_agent/
 
 ## 7. 测试
 
-离线测试（共 163 个用例，不需要 Key、不需要网络；符号链接用例在无权限的
+离线测试（共 322 个用例，不需要 Key、不需要网络；符号链接用例在无权限的
 Windows 环境会自动跳过）：
 
 ```bash
@@ -690,7 +722,8 @@ TTL 与过期清理、容量上限、上下文预算、单轮/跨轮上下文压
 反向地理编码供应商回退、正向地理编码候选与回退、`/api/chat` 坐标传递与不落盘、
 非法坐标 422 校验、历史与记忆注入、SSE 流式接口、会话落盘、自进化裁判的
 冻结路径检查、diff 行数预算、测试/评分解析、临时沙箱安全探针、历史迭代摘要
-与建议闭环，以及 12 个离线行为评测场景（读取、行区间读取、错误恢复、会话记忆、批量补丁
+与建议闭环、root 文件访问模式、用量 JSON、基准任务的参考解/篡改检测/指标聚合，
+以及 12 个离线行为评测场景（读取、行区间读取、错误恢复、会话记忆、批量补丁
 原子性、权限拒绝、受保护路径、重复调用、未知工具、强制收口、引用提取）。
 
 工具联网检查：

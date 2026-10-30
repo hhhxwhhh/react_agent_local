@@ -1,0 +1,12 @@
+{
+  "id": "04-rename-helper",
+  "title": "跨文件重命名函数并保留字符串字面量",
+  "category": "refactor",
+  "difficulty": "easy",
+  "max_steps": 20,
+  "timeout_seconds": 240,
+  "test_timeout_seconds": 120,
+  "hidden": "hidden/test_04_rename_helper_hidden.py",
+  "reference": "reference/",
+  "prompt": "把 helpers.py 中的函数 calc_total 重命名为 calculate_total，并更新 app.py 的调用。只改函数定义、调用和注释中的标识符；字符串字面量 \"calc_total\"、常量文本以及模块 docstring 中出现的 calc_total 必须保持不变。不要保留旧函数别名。不要修改 tests/ 下已有测试。完成后运行测试。"
+}

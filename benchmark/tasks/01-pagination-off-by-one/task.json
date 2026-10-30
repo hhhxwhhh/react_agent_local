@@ -1,0 +1,12 @@
+{
+  "id": "01-pagination-off-by-one",
+  "title": "修复分页切片的 off-by-one",
+  "category": "bugfix",
+  "difficulty": "easy",
+  "max_steps": 18,
+  "timeout_seconds": 240,
+  "test_timeout_seconds": 120,
+  "hidden": "hidden/test_01_pagination_off_by_one_hidden.py",
+  "reference": "reference/",
+  "prompt": "修复 pagination.py 的 paginate(items, page, per_page)。页码从 1 开始，每页最多 per_page 条，返回 list；最后一页不足时返回剩余元素。page < 1 或 per_page < 1 时抛出 ValueError（消息包含参数名）。不要修改 tests/ 下已有测试。完成后运行测试。"
+}

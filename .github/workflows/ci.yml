@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Compile
+        run: python -m compileall -q agent.py tools.py benchmark tests
+
+      - name: Offline unit tests
+        run: python -X utf8 -m unittest discover -s tests -v
+
+      - name: Validate held-out task references
+        run: python -X utf8 benchmark/runner.py --all --reference
+
+      - name: Validate benchmark task structure
+        run: python -X utf8 benchmark/runner.py --dry-run

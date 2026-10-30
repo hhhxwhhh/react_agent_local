@@ -1,0 +1,12 @@
+{
+  "id": "05-retry-backoff",
+  "title": "实现带指数退避的重试",
+  "category": "feature",
+  "difficulty": "medium",
+  "max_steps": 24,
+  "timeout_seconds": 300,
+  "test_timeout_seconds": 120,
+  "hidden": "hidden/test_05_retry_backoff_hidden.py",
+  "reference": "reference/",
+  "prompt": "完善 retry.py 的 retry(func, attempts=3, base_delay=0.0, sleep=time.sleep, exceptions=(Exception,))。attempts < 1 或 base_delay < 0 时抛 ValueError。只捕获 exceptions 中的异常；第 1 次失败后等待 base_delay，第 2 次失败后等待 2*base_delay，依此类推（指数退避）。成功立即返回；最终仍失败时重新抛出最后一次原始异常。不要修改 tests/ 下已有测试。完成后运行测试。"
+}

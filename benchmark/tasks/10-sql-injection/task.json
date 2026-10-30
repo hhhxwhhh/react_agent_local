@@ -1,0 +1,12 @@
+{
+  "id": "10-sql-injection",
+  "title": "把用户查询改成参数化 SQL",
+  "category": "security",
+  "difficulty": "easy",
+  "max_steps": 16,
+  "timeout_seconds": 240,
+  "test_timeout_seconds": 120,
+  "hidden": "hidden/test_10_sql_injection_hidden.py",
+  "reference": "reference/",
+  "prompt": "修复 user_store.py 的 find_user(conn, username)，用参数化查询防止 SQL 注入。查询 users 表的 id、username 两列并返回全部匹配行（sqlite3 的 tuple 列表）。不要修改 tests/ 下已有测试。完成后运行测试。"
+}

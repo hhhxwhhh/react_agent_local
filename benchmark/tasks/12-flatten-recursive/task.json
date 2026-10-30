@@ -1,0 +1,12 @@
+{
+  "id": "12-flatten-recursive",
+  "title": "递归展平嵌套列表和元组",
+  "category": "feature",
+  "difficulty": "medium",
+  "max_steps": 18,
+  "timeout_seconds": 240,
+  "test_timeout_seconds": 120,
+  "hidden": "hidden/test_12_flatten_recursive_hidden.py",
+  "reference": "reference/",
+  "prompt": "完善 flatten.py 的 flatten(items)：递归展开任意层级的 list 和 tuple，保持元素顺序；字符串、数字等其他值作为原子元素保留；不修改输入。不要修改 tests/ 下已有测试。完成后运行测试。"
+}

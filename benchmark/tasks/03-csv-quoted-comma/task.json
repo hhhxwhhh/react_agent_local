@@ -1,0 +1,12 @@
+{
+  "id": "03-csv-quoted-comma",
+  "title": "支持带引号和转义引号的 CSV 行",
+  "category": "parsing",
+  "difficulty": "medium",
+  "max_steps": 24,
+  "timeout_seconds": 300,
+  "test_timeout_seconds": 120,
+  "hidden": "hidden/test_03_csv_quoted_comma_hidden.py",
+  "reference": "reference/",
+  "prompt": "修复 csv_utils.py，使 parse_line 支持双引号字段：引号内的逗号属于字段内容，两个连续双引号表示一个字面双引号，字段两端空白要去掉。parse_csv 逐行解析并跳过空行；引号未闭合时抛出 ValueError。不要修改 tests/ 下已有测试。完成后运行测试。"
+}

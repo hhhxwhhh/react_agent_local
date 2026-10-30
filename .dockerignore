@@ -1,0 +1,20 @@
+# 密钥与本地隐私数据绝不进入镜像
+.env
+data/
+workspace/
+docs/
+AGENT_DEEP_DIVE.md
+*.pdf
+
+# 本地运行产物与缓存
+benchmark/results/*.json
+benchmark/workspaces/
+benchmark/.work/
+.git/
+.gitignore
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+node_modules/

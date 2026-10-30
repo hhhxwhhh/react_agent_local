@@ -1,0 +1,12 @@
+{
+  "id": "09-memoize-fib",
+  "title": "用缓存把递归 Fibonacci 变成可重复调用",
+  "category": "feature",
+  "difficulty": "easy",
+  "max_steps": 16,
+  "timeout_seconds": 240,
+  "test_timeout_seconds": 120,
+  "hidden": "hidden/test_09_memoize_fib_hidden.py",
+  "reference": "reference/",
+  "prompt": "优化 fib.py：保留 fib(n) 接口，使用 functools.lru_cache 缓存结果，使 fib(100) 能快速返回。n < 0 时抛 ValueError。fib 必须暴露 cache_info() 和 cache_clear()（lru_cache 自带）。不要修改 tests/ 下已有测试。完成后运行测试。"
+}

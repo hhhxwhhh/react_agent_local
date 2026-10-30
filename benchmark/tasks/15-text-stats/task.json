@@ -1,0 +1,12 @@
+{
+  "id": "15-text-stats",
+  "title": "统计词频时统一大小写并去掉标点",
+  "category": "feature",
+  "difficulty": "medium",
+  "max_steps": 20,
+  "timeout_seconds": 240,
+  "test_timeout_seconds": 120,
+  "hidden": "hidden/test_15_text_stats_hidden.py",
+  "reference": "reference/",
+  "prompt": "完善 text_stats.py 的 word_frequencies(text)：按空白切分，转小写，去掉每个词两端的 ASCII 标点和中文标点（，。！？；：“”‘’（）【】），忽略空词，返回词到次数的 dict。词内部的撇号（如 don't）保留。不要修改 tests/ 下已有测试。完成后运行测试。"
+}
