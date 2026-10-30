@@ -649,6 +649,9 @@ class ReActAgent:
         # 避免压缩后模型误判“尚未修改”而重复劳动。
         self.landed_files: list[str] = []
         self.verification_status: str = ""
+        # search_files 首次返回后是否已注入“下一步精确读取/落盘”前置提示；
+        # 每个任务重置一次，避免跨任务残留导致后续任务不再提示。
+        self._search_after_hinted: bool = False
 
         global _COLOR_ENABLED
         _COLOR_ENABLED = use_color
@@ -856,6 +859,26 @@ class ReActAgent:
                 "禁止再次重复同一 search_files 调用。"
             )
         return base + " 禁止再次重复同一调用。"
+
+    def _precheck_search_after(self, tool_name: str, args: dict) -> str | None:
+        """search_files 首次返回后注入前置提示，避免“搜索后不落盘”。
+
+        本代诊断显示 duplicate_actions 中 search_files 占比仍高，瓶颈不在
+        重复提醒文案，而在“搜索后不落盘”。这里在 search_files 首次成功
+        返回后立即追加一次前置提示，引导模型下一步用 read_file 精确区间
+        读取或直接落盘，而不是再次搜索。
+        """
+        if tool_name != "search_files":
+            return None
+        if getattr(self, "_search_after_hinted", False):
+            return None
+        self._search_after_hinted = True
+        return (
+            "\n[系统提示] 搜索已完成。下一步请基于上面的命中行号，"
+            "用 read_file 的 start_line/end_line 精确读取目标区间，"
+            "或直接用 apply_patch / edit_lines / write_file 落盘最小改动；"
+            "不要再次重复同一 search_files 调用。"
+        )
 
     def _summarize_text(
         self,
@@ -1477,6 +1500,26 @@ class ReActAgent:
                                 observation = run_tool(
                                     tool_name, args, context=self.tool_context
                                 )
+                                # search_files 首次返回后注入前置提示：
+                                # 本代诊断显示 duplicate_actions 中 search_files
+                                # 占比仍高，瓶颈在“搜索后不落盘”。这里在首次
+                                # 成功返回后立即引导下一步 read_file 精确区间
+                                # 或落盘，而不是等到重复才提醒。
+                                search_hint = self._precheck_search_after(
+                                    tool_name, args
+                                )
+                                if search_hint is not None:
+                                    observation += search_hint
+                                    self._emit(
+                                        {
+                                            "type": "note",
+                                            "step": step,
+                                            "text": (
+                                                "search_files 首次返回，"
+                                                "已注入下一步落盘/精确读取提示"
+                                            ),
+                                        }
+                                    )
                         # 工具层硬跳过与循环层联动：连续多次被硬跳过时，
                         # 直接注入系统消息，强制模型改用 search_files 定位。
                         # 与 tools.py 中 read_file 的计数 key 保持一致：
