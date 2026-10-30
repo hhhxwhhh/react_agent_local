@@ -4934,6 +4934,30 @@ TOOL_FUNCS: dict[str, Callable[..., str]] = {
     "recall": recall,
 }
 
+
+def _apply_tool_ablation() -> frozenset[str]:
+    """按 AGENT_DISABLED_TOOLS 移除工具，供基准测试做工具消融。
+
+    必须在 Agent 子进程启动前设置，因为工具清单在 import 时生成；未知工具名
+    直接报错，避免“以为禁用了某个工具、实际没有”的静默实验污染。
+    """
+    raw = os.getenv("AGENT_DISABLED_TOOLS", "").strip()
+    if not raw:
+        return frozenset()
+    names = {part.strip() for part in raw.split(",") if part.strip()}
+    unknown = names - set(TOOL_SPECS)
+    if unknown:
+        raise RuntimeError(
+            "AGENT_DISABLED_TOOLS 包含未知工具：" + ", ".join(sorted(unknown))
+        )
+    for name in names:
+        TOOL_SPECS.pop(name, None)
+        TOOL_FUNCS.pop(name, None)
+    return frozenset(names)
+
+
+ABLATED_TOOLS = _apply_tool_ablation()
+
 # 这些函数保留实现，但刻意不注册给模型：它们要么是通用小工具，要么已被
 # apply_patch / 自动记忆重排 / CLI 与 Web 面板替代。新增注册前先确认必要性。
 INTERNAL_ONLY_TOOLS = frozenset(

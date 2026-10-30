@@ -10,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from benchmark import metrics, runner  # noqa: E402
+from benchmark import compare, metrics, runner  # noqa: E402
 
 
 class TestBenchmarkTasks(unittest.TestCase):
@@ -174,6 +174,27 @@ class TestMetrics(unittest.TestCase):
         self.assertEqual(summary["success_rate"], 0.5)
         self.assertEqual(summary["tokens_per_solved"], 100.0)
         self.assertEqual(summary["failure_reasons"], {"hidden_tests_failed": 1})
+
+    def test_compare_reports_fixed_and_regressed_tasks(self):
+        def result(task, success, tokens):
+            return {
+                "task": task,
+                "success": success,
+                "mode": "agent",
+                "timestamp": "20260101T000000Z",
+                "agent": {"usage": {"total_tokens": tokens}, "duration_seconds": 1},
+                "failure_reasons": [] if success else ["hidden_tests_failed"],
+            }
+
+        report = compare.compare(
+            [result("a", False, 50), result("b", True, 10), result("c", True, 20)],
+            [result("a", True, 40), result("b", False, 30), result("c", True, 5)],
+        )
+        self.assertEqual(report["baseline_solved"], 2)
+        self.assertEqual(report["candidate_solved"], 2)
+        self.assertEqual(report["fixed"], ["a"])
+        self.assertEqual(report["regressed"], ["b"])
+        self.assertEqual(report["token_delta"], -5)
 
     def test_ledger_summary_handles_nested_usage(self):
         with tempfile.TemporaryDirectory() as temp:

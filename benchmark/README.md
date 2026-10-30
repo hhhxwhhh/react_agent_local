@@ -35,6 +35,33 @@ python -X utf8 benchmark/metrics.py --json --output benchmark/results/summary.js
 运行器仍来自当前仓库。历史版本必须已经支持 `--usage-json` 和
 `FILE_ACCESS_MODE=root`，否则会因参数或隔离不兼容而失败。
 
+### 工具消融
+
+`--disable-tools` 在 Agent 子进程里设置 `AGENT_DISABLED_TOOLS`，从
+`TOOL_SPECS` / `TOOL_FUNCS` 和提示词工具清单中同时移除指定工具。可以用同一批
+任务比较“去掉 `run_tests`”“去掉 `apply_patch`”“只保留读文件”等配置：
+
+```bash
+python -X utf8 benchmark/runner.py --all --disable-tools run_tests
+python -X utf8 benchmark/runner.py --all --disable-tools "apply_patch,edit_lines"
+```
+
+未知工具名会让 Agent 启动失败，避免拼写错误被误当成有效消融。结果 JSON 的
+`disabled_tools` 字段记录配置，建议不同配置写到不同的 `--results-dir`，否则
+`metrics.py` 会按任务只取最新一份。
+
+### A/B 对比
+
+两次运行写到不同目录后，可以直接比较修复/回归与 token 成本：
+
+```bash
+python -X utf8 benchmark/runner.py --all --results-dir benchmark/results/baseline
+python -X utf8 benchmark/runner.py --all --results-dir benchmark/results/candidate
+python -X utf8 benchmark/compare.py benchmark/results/baseline benchmark/results/candidate
+```
+
+`compare.py` 只比较两边都出现过的任务；有回归时退出码为 1，适合放进发布检查。
+
 结果默认写到 `benchmark/results/`。同一任务有多份结果时，`metrics.py` 只取
 时间戳最新的一份，所以可以反复跑而不必先清空目录。
 

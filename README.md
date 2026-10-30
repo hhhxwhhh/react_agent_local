@@ -297,6 +297,12 @@ python -X utf8 benchmark/runner.py --all --reference
 # 跑全部任务；单任务用 01、02 这样的前缀
 python -X utf8 benchmark/runner.py --all
 
+# 工具消融：同一批任务去掉 run_tests / apply_patch 再跑
+python -X utf8 benchmark/runner.py --all --disable-tools run_tests
+
+# A/B：比较两个结果目录的解决率与 token 成本
+python -X utf8 benchmark/compare.py baseline_results/ candidate_results/
+
 # 汇总最新结果与自进化历史
 python -X utf8 benchmark/metrics.py
 ```
@@ -700,7 +706,7 @@ react_agent/
 
 ## 7. 测试
 
-离线测试（共 322 个用例，不需要 Key、不需要网络；符号链接用例在无权限的
+离线测试（共 324 个用例，不需要 Key、不需要网络；符号链接用例在无权限的
 Windows 环境会自动跳过）：
 
 ```bash

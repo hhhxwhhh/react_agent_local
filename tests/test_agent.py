@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -204,6 +205,34 @@ class TestTools(unittest.TestCase):
     def test_run_tool_catches_error(self):
         result = run_tool("read_file", {"path": "no_such_file_for_error_test.txt"})
         self.assertTrue(result.startswith("ERROR"))
+
+    def test_tool_ablation_filters_specs_and_dispatch(self):
+        env = os.environ.copy()
+        env["AGENT_DISABLED_TOOLS"] = "run_tests,web_search"
+        code = (
+            "import json, tools; "
+            "print(json.dumps({"
+            "'specs': sorted(tools.TOOL_SPECS), "
+            "'funcs': sorted(tools.TOOL_FUNCS), "
+            "'ablated': sorted(tools.ABLATED_TOOLS)}))"
+        )
+        completed = subprocess.run(
+            [sys.executable, "-X", "utf8", "-c", code],
+            cwd=Path(__file__).resolve().parents[1],
+            env=env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        payload = json.loads(completed.stdout)
+        self.assertNotIn("run_tests", payload["specs"])
+        self.assertNotIn("run_tests", payload["funcs"])
+        self.assertNotIn("web_search", payload["specs"])
+        self.assertEqual(payload["ablated"], ["run_tests", "web_search"])
+        self.assertIn("read_file", payload["specs"])
 
     def test_run_tool_optional_args(self):
         result = run_tool("list_files", {"max_entries": 5})
