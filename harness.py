@@ -477,6 +477,47 @@ def classify_precheck_read_reminder(trace: list[dict] | None) -> dict:
     }
 
 
+# 工具定位速查：把最常用的验证工具 run_tests 的 TOOL_SPECS 原文与行号直接
+# 写进任务描述，减少下一代在 tools.py 里反复 search_files/read_file 定位的
+# 只读轮次（blind_read_loop 的主要成因之一）。
+RUN_TESTS_SPEC_LINES = "tools.py L4537-L4557"
+RUN_TESTS_SPEC_SNIPPET = (
+    '    "run_tests": {\n'
+    '        "description": "运行项目测试套件并返回结构化结果。默认执行 '
+    'python -m unittest discover -s tests -v；也可用 pattern 指定模块或用例。'
+    '会先请求用户授权。自进化流程必须用它验证修改，不能改测试来伪造通过。",\n'
+    '        "parameters": {\n'
+    '            "type": "object",\n'
+    '            "properties": {\n'
+    '                "pattern": {"type": "string", "description": "可选，unittest '
+    '模块或用例，例如 tests.test_agent.TestFileTools"},\n'
+    '                "cwd": {"type": "string", "description": "工作目录，默认项目根目录"},\n'
+    '                "timeout": {"type": "integer", "description": "超时秒数，默认 120，最大 600"},\n'
+    '            },\n'
+    '            "required": [],\n'
+    '        },\n'
+    '        "context": True,\n'
+    '    },'
+)
+
+
+def tool_locator_block() -> str:
+    """返回 run_tests 的 TOOL_SPECS 原文片段与行号速查块。
+
+    纯函数、无副作用，便于单测。内容与 tools.py 中 TOOL_SPECS 的 run_tests
+    条目保持一致；若 tools.py 结构变化，只需同步本常量。
+    """
+    return (
+        "\n## 工具定位速查（减少只读定位轮次）\n"
+        f"- `run_tests` 的 TOOL_SPECS 定义位于 {RUN_TESTS_SPEC_LINES}，原文如下：\n"
+        "```python\n"
+        f"{RUN_TESTS_SPEC_SNIPPET}\n"
+        "```\n"
+        "- 需要验证改动时直接调用 `run_tests`（默认跑全量），不要为了确认它的"
+        "参数而反复 search_files/read_file；参数已在上方给出。\n"
+    )
+
+
 def default_objective() -> str:
     """返回没有显式目标时使用的默认改进目标。"""
     return DEFAULT_OBJECTIVE
@@ -575,6 +616,7 @@ def build_generation_question(
             + precheck["advice"]
             + "\n"
         )
+    locator_block = tool_locator_block()
     return f"""你正在参与“自进化 Harness”的第 {generation} 代迭代。
 你的任务不是回答问题，而是修改当前仓库中的自己，产出一个可验证的下一代版本。
 
@@ -583,7 +625,7 @@ def build_generation_question(
 
 ## 长期目标（所有代共同朝这个方向）
 {LONG_TERM_GOAL}
-{task_block}{innovation_block}
+{task_block}{innovation_block}{locator_block}
 ## 当前基线
 - 仓库根目录：当前工作目录
 - 基线提交：{baseline_commit}
