@@ -2736,6 +2736,46 @@ def find_references(
     )
 
 
+def rename_symbol(
+    old: str,
+    new: str,
+    path: str = ".",
+    dry_run: bool = True,
+    *,
+    context: ToolContext | None = None,
+) -> str:
+    """用 AST 安全重命名 Python 符号：只改 def/class/import/Name/Attribute。"""
+    target = _resolve_path(path)
+    if not target.exists():
+        raise ValueError(f"路径不存在：{_display_path(target)}")
+    if not _is_path_allowed(target):
+        raise ValueError("路径不在允许访问的范围内")
+    plan = code_nav.build_rename_plan(target, old, new)
+    if not plan.files:
+        return code_nav.format_rename_plan(plan, dry_run)
+    if dry_run:
+        return code_nav.format_rename_plan(plan, True)
+    for item in plan.files:
+        _ensure_writable_target(item.path)
+        if not _is_path_allowed(item.path):
+            raise ValueError(f"路径不在允许访问的范围内：{_display_path(item.path)}")
+    _request_permission(
+        context,
+        tool="rename_symbol",
+        title="符号重命名权限",
+        detail=(
+            f"Agent 想把符号 {old} 重命名为 {new}，"
+            f"涉及 {len(plan.files)} 个文件、{plan.total_edits} 处改动"
+        ),
+        old=old,
+        new=new,
+        files=[_display_path(item.path) for item in plan.files],
+    )
+    for item in plan.files:
+        _atomic_write_text(item.path, item.new_text)
+    return code_nav.format_rename_plan(plan, False)
+
+
 # ---------------------------------------------------------------------------
 # 本机命令执行（需要用户授权；超时终止进程树）
 # ---------------------------------------------------------------------------
@@ -4108,6 +4148,31 @@ TOOL_SPECS: dict[str, dict] = {
             "required": ["symbol"],
         },
     },
+    "rename_symbol": {
+        "description": "用 AST 安全重命名 Python 符号：只改 def/class/import/Name/Attribute 中的目标符号，字符串和注释里的同名文本保持不变。dry_run=True 只返回计划不写盘，False 才落盘。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "old": {
+                    "type": "string",
+                    "description": "原符号名（合法 Python 标识符）",
+                },
+                "new": {
+                    "type": "string",
+                    "description": "新符号名（合法 Python 标识符）",
+                },
+                "path": {
+                    "type": "string",
+                    "description": "搜索起点，默认 .（项目根目录）",
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "true 只返回计划不写盘（默认），false 才落盘",
+                },
+            },
+            "required": ["old", "new"],
+        },
+    },
     "run_command": {
         "description": "在本机 shell 中执行命令或代码，例如 python -X utf8 -c \"print(1+1)\"、python -X utf8 script.py、node app.js、git status、dir。需要实际运行/验证代码时优先用它；cwd 可为绝对路径，相对路径以项目根目录为基准。会按授权模式自动放行或请求确认，超时后终止进程树。",
         "parameters": {
@@ -4502,6 +4567,7 @@ TOOL_FUNCS: dict[str, Callable[..., str]] = {
     "search_files": search_files,
     "repo_map": repo_map,
     "find_references": find_references,
+    "rename_symbol": rename_symbol,
     "project_overview": project_overview,
     "import_graph": import_graph,
     "code_audit": code_audit,
