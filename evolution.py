@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import os
 import re
@@ -436,6 +437,134 @@ def find_path_violations(paths: list[str], baseline: str | None = None) -> list[
         if any(normalized.startswith(prefix) for prefix in PROTECTED_PREFIXES):
             violations.append(f"{normalized}：属于冻结边界")
     return violations
+
+
+_DEAD_CODE_SKIP_DIRS = {
+    ".git",
+    ".hg",
+    ".svn",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    "node_modules",
+    ".venv",
+    "venv",
+    "dist",
+    "build",
+    "data",
+    "workspace",
+    "benchmark",
+}
+
+
+def _iter_python_files(root: Path) -> Iterator[Path]:
+    for path in root.rglob("*.py"):
+        try:
+            relative = path.relative_to(root)
+        except ValueError:
+            continue
+        if any(part in _DEAD_CODE_SKIP_DIRS for part in relative.parts[:-1]):
+            continue
+        if path.is_file():
+            yield path
+
+
+def _top_level_names(tree: ast.AST) -> set[str]:
+    names = set()
+    for node in getattr(tree, "body", []):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+    return names
+
+
+def _reference_counts(root: Path) -> Counter[str]:
+    """统计 AST 中的标识符引用（不是注释/普通字符串里的文本）。"""
+    counts: Counter[str] = Counter()
+    for path in _iter_python_files(root):
+        try:
+            if path.stat().st_size > 2_000_000:
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, SyntaxError, ValueError):
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name):
+                counts[node.id] += 1
+            elif isinstance(node, ast.Attribute):
+                counts[node.attr] += 1
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                for alias in node.names:
+                    counts[alias.name.split(".")[-1]] += 1
+                    if alias.asname:
+                        counts[alias.asname] += 1
+            elif isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id == "__all__":
+                        for item in getattr(node.value, "elts", []):
+                            if isinstance(item, ast.Constant) and isinstance(
+                                item.value, str
+                            ):
+                                counts[item.value] += 1
+    return counts
+
+
+def _dead_symbols(
+    root: Path, changes: dict[str, str]
+) -> list[str]:
+    """返回“新增但全仓库零引用”的顶层函数/类。
+
+    changes 的 value 是基线文本；空串表示新文件。这是一条保守规则：
+    通过字符串 getattr/反射动态调用的新符号可能被误判，Agent 应补一个
+    静态引用或测试，而不是依赖隐式约定。
+    """
+    added: list[tuple[str, str]] = []
+    for relative, old_text in sorted(changes.items()):
+        target = root / relative
+        try:
+            new_text = target.read_text(encoding="utf-8", errors="replace")
+            new_tree = ast.parse(new_text, filename=str(target))
+        except (OSError, SyntaxError, ValueError):
+            continue
+        try:
+            old_tree = ast.parse(old_text or "", filename=str(target))
+        except SyntaxError:
+            old_tree = ast.parse("", filename=str(target))
+        for name in sorted(_top_level_names(new_tree) - _top_level_names(old_tree)):
+            if name.startswith("__") and name.endswith("__"):
+                continue
+            added.append((relative, name))
+    if not added:
+        return []
+    refs = _reference_counts(root)
+    return [
+        f"{relative}:{name}"
+        for relative, name in added
+        if refs.get(name, 0) == 0
+    ]
+
+
+def find_dead_code(
+    root: Path, paths: list[str], baseline: str | None
+) -> list[str]:
+    """检查本轮候选新增的顶层符号是否完全没人引用。"""
+    changes: dict[str, str] = {}
+    for raw in paths:
+        relative = str(raw or "").replace("\\", "/").strip()
+        if not relative or relative.startswith("tests/"):
+            continue
+        if Path(relative).suffix.lower() != ".py":
+            continue
+        target = root / relative
+        if not target.is_file():
+            continue
+        old_text = ""
+        if baseline:
+            proc = _git(["show", f"{baseline}:{relative}"], cwd=root)
+            if proc.returncode == 0:
+                old_text = proc.stdout
+        changes[relative] = old_text
+    return _dead_symbols(root, changes)
 
 
 def _status_paths(cwd: Path = ROOT) -> list[str]:
@@ -2595,6 +2724,21 @@ def run_single_generation(args: argparse.Namespace) -> int:
                 reason=(
                     f"测试数量从 {baseline_tests.total} 降到 {candidate_tests.total}；"
                     "不允许通过减少测试来通过"
+                ),
+            )
+            return 0
+
+        dead_code = find_dead_code(ROOT, paths, baseline_commit)
+        record["candidate"]["dead_code"] = dead_code
+        if dead_code:
+            _reject(
+                root=ROOT,
+                baseline=baseline_commit,
+                generation=generation,
+                record=record,
+                reason=(
+                    "新增顶层符号没有任何引用（疑似死代码）："
+                    + ", ".join(dead_code[:12])
                 ),
             )
             return 0
