@@ -1302,10 +1302,21 @@ class ReActAgent:
                                     "step": step,
                                     "text": (
                                         f"同一调用累计重复 {repeat_total} 次，"
-                                        "已注入强制转向消息"
+                                        "已注入强制转向消息并收口"
                                     ),
                                 }
                             )
+                            # 累计重复达到上限：直接收口，跳过后续 LLM 调用，
+                            # 避免模型在“已提醒”后仍反复提交同一调用（本代
+                            # duplicate_actions 根因：同一 apply_patch 重复 3 次）。
+                            stalled = True
+                            stall_reason = "repeat_total"
+                            self._say(
+                                _yellow(
+                                    "(同一调用累计重复达上限，提前收口并生成最终答案)"
+                                )
+                            )
+                            break
                         self._say(_yellow("(检测到重复调用，已跳过工具执行)"))
                         self._emit(
                             {
@@ -1500,9 +1511,12 @@ class ReActAgent:
         # 达到最大轮数，或检测到重复调用后提前收口
         self._check_cancel(cancel_event)
         if stalled:
-            reason_text = (
-                "连续格式错误" if stall_reason == "format" else "连续重复调用"
-            )
+            if stall_reason == "format":
+                reason_text = "连续格式错误"
+            elif stall_reason == "repeat_total":
+                reason_text = "同一调用累计重复达上限"
+            else:
+                reason_text = "连续重复调用"
             self._say(_dim(f"\n--- 检测到{reason_text}，强制生成最终答案 ---"))
             self._emit(
                 {
