@@ -2474,6 +2474,45 @@ def _collect_top_level_defs(tree: ast.AST) -> dict[str, str]:
     return found
 
 
+def _ast_impact_references(
+    target: Path,
+    removed: list[str],
+    changed: list[str],
+    max_symbols: int = 5,
+    max_refs: int = 3,
+) -> list[str]:
+    """写前影响面反查：对删除/签名变化的符号列出调用点（file:line）。
+
+    只读、失败静默：任何异常都返回空列表，绝不阻断写入。
+    """
+    symbols: list[str] = []
+    for name in list(removed) + list(changed):
+        base = name.split(".", 1)[0]
+        if base and base not in symbols:
+            symbols.append(base)
+    if not symbols:
+        return []
+    root = target.parent if target.parent != Path("") else Path(".")
+    lines: list[str] = []
+    for symbol in symbols[:max_symbols]:
+        try:
+            report = code_nav.find_references(root, symbol, max_results=max_refs + 1)
+        except Exception:
+            continue
+        refs = [
+            line.strip()
+            for line in report.splitlines()
+            if ":" in line and "[" in line and "[定义]" not in line
+        ]
+        if not refs:
+            continue
+        shown = refs[:max_refs]
+        lines.append(f"  影响面：{symbol} 有 {len(refs)} 处引用")
+        for ref in shown:
+            lines.append(f"    - {ref}")
+    return lines
+
+
 def _ast_diff_summary(path: str | Path, old_text: str, new_text: str) -> str:
     """写 .py 前的 AST 结构预演：新增/删除/签名变化。
 
@@ -2510,6 +2549,10 @@ def _ast_diff_summary(path: str | Path, old_text: str, new_text: str) -> str:
                 f"{n}：{old_defs[n]} -> {new_defs[n]}" for n in changed
             )
         )
+    # 写前影响面反查：删除/签名变化会打断调用点，落盘前先列出引用位置。
+    impact = _ast_impact_references(target, removed, changed)
+    if impact:
+        lines.extend(impact)
     return "\n".join(lines)
 
 
