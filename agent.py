@@ -47,7 +47,10 @@ from tools import (
     run_tool,
 )
 
-STOP_SEQUENCES = ["Observation:", "Observation："]
+# 必须带前导换行：模型写代码时经常在 JSON 字符串里写 "\\nObservation: ..."
+# （例如给 scratchpad 注入观测提醒），裸 "Observation:" 会在字符串中间命中
+# stop sequence，把 Action Input 截断（第 53/54 代的落盘失败根因）。
+STOP_SEQUENCES = ["\nObservation:", "\nObservation："]
 
 # 这些工具会改变外部状态；调用后清空“已见调用”，允许模型重新读取变化后的结果。
 STATE_CHANGING_TOOLS = {
@@ -260,6 +263,11 @@ def parse_output(text: str) -> tuple[str, object, str]:
             r"Action\s*Input\s*[:：]\s*(.*)", text, re.S | re.I
         )
         raw_input = input_match.group(1).strip() if input_match else ""
+        # 兼容不遵守 stop sequence 的模型：Action Input 之后若另起一行写
+        # Observation，那是对观测的捏造，截掉，避免污染工具参数。
+        raw_input = re.split(
+            r"\n[ \t]*Observation\s*[:：]", raw_input, maxsplit=1
+        )[0].strip()
         return "action", (action_match.group(1), raw_input), thought
 
     # 兼容模型把 Final Answer 写在行中间的历史行为，但放在 Action 检测之后。
@@ -371,7 +379,17 @@ def parse_action_input(raw_input: str, tool_name: str) -> dict:
             if first_line:
                 return {required[0]: first_line}
 
-    raise ValueError("Action Input 必须是合法的 JSON 对象")
+    hint = ""
+    if (
+        raw.count("{") != raw.count("}")
+        or raw.count("[") != raw.count("]")
+        or raw.count('"') % 2
+    ):
+        hint = (
+            "；输入疑似被截断。单次编辑请控制在 5 行以内，"
+            "拆成多次 edit_lines，或把长文本拆成几个短片段替换"
+        )
+    raise ValueError("Action Input 必须是合法的 JSON 对象" + hint)
 
 
 # ---------------------------------------------------------------------------

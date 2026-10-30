@@ -111,6 +111,30 @@ class TestParsing(unittest.TestCase):
         )
         self.assertEqual(args, {"query": "ReAct 论文"})
 
+    def test_stop_sequences_require_leading_newline(self):
+        for stop in agent_module.STOP_SEQUENCES:
+            self.assertTrue(stop.startswith("\n"), stop)
+            self.assertIn("Observation", stop)
+
+    def test_action_input_keeps_observation_inside_json_string(self):
+        text = (
+            "Thought: 改代码。\nAction: edit_lines\n"
+            'Action Input: {"path": "agent.py", "lines": '
+            '["    scratchpad += \\"\\\\nObservation: 提醒\\""]}\n'
+            "Observation: 模型伪造的观测"
+        )
+        kind, payload, _ = parse_output(text)
+        self.assertEqual(kind, "action")
+        args = parse_action_input(payload[1], "edit_lines")
+        self.assertEqual(args["path"], "agent.py")
+        self.assertIn("\\nObservation: 提醒", args["lines"][0])
+        self.assertNotIn("伪造的观测", payload[1])
+
+    def test_truncated_action_input_reports_hint(self):
+        with self.assertRaises(ValueError) as ctx:
+            parse_action_input('{"lines": ["a", "b', "edit_lines")
+        self.assertIn("截断", str(ctx.exception))
+
     def test_action_input_code_fence(self):
         args = parse_action_input('```json\n{"city": "上海"}\n```', "get_weather")
         self.assertEqual(args, {"city": "上海"})
