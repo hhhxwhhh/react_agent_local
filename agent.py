@@ -564,9 +564,20 @@ class ReActAgent:
         history_inject_messages: int | None = None,
         history_inject_chars: int | None = None,
         progress_nudge_steps: int = 0,
+        max_repeat_total: int | None = None,
     ) -> None:
         self.llm = llm
         self.max_steps = max(1, int(max_steps))
+        # 只读 git 重复收口阈值：优先取显式参数，其次读 harness 通过
+        # AGENT_MAX_REPEAT_TOTAL 注入的 recommended_threshold 诊断值，
+        # 最后回退到模块常量（收敛率低时 harness 会注入 2 提前收口）。
+        if max_repeat_total is None:
+            env_val = os.environ.get("AGENT_MAX_REPEAT_TOTAL", "").strip()
+            try:
+                max_repeat_total = int(env_val) if env_val else MAX_REPEAT_TOTAL
+            except ValueError:
+                max_repeat_total = MAX_REPEAT_TOTAL
+        self.max_repeat_total = max(2, int(max_repeat_total))
         self.verbose = verbose
         self.default_memory_scope = (
             "session" if default_memory_scope == "session" else "global"
@@ -1341,7 +1352,7 @@ class ReActAgent:
                         # 同一调用累计重复 ≥3 次：无论中间是否穿插其他调用，
                         # 都注入强制转向消息，避免模型交替执行不同命令绕过
                         # consecutive_duplicates 的连续计数（本代 duplicate_actions 根因）。
-                        if repeat_total >= MAX_REPEAT_TOTAL:
+                        if repeat_total >= self.max_repeat_total:
                             observation += (
                                 "\n[系统强制转向] 该调用（"
                                 f"{tool_name}）已累计重复 {repeat_total} 次，"
