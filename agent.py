@@ -1226,13 +1226,34 @@ class ReActAgent:
                         if self._is_git_readonly_call(tool_name, args):
                             # 只读 git 命令重复：注入收敛提醒，与 harness.py 的
                             # duplicate_actions_after_diff 诊断形成双保险。
+                            # 关键：结合 landed_files / verification_status 给出
+                            # 唯一动作，避免“若 diff 非空…若 diff 为空…”的二选一
+                            # 模糊提醒导致模型继续重复 git 调用。
+                            if self.landed_files and not self.verification_status:
+                                git_next = (
+                                    "你已有非空改动（"
+                                    + "、".join(self.landed_files[:3])
+                                    + "），请立即用 run_tests 验证并收敛交卷。"
+                                )
+                            elif self.landed_files and self.verification_status:
+                                git_next = (
+                                    "改动已落盘且已通过验证（"
+                                    + self.verification_status
+                                    + "），请立即输出 Final Answer，不要再重复调用。"
+                                )
+                            else:
+                                git_next = (
+                                    "你尚未落盘任何改动，请立即用 write_file / "
+                                    "edit_lines / apply_patch 落地最小改动，"
+                                    "再用 run_tests 验证；若任务无需修改，请直接输出 "
+                                    "Final Answer。"
+                                )
                             observation = (
                                 "[系统] 你刚刚已经用完全相同的参数执行过 "
                                 f"git {args.get('operation', '')}，结果已在上一条 "
-                                "Observation 中。只读 git 命令重复执行不会推进任务："
-                                "若 diff 非空，请立即用 run_tests 验证并收敛交卷；"
-                                "若 diff 为空，请先真实落盘改动再验证。"
-                                "不要为了“再确认一次”重复执行同一 git 命令。"
+                                "Observation 中。只读 git 命令重复执行不会推进任务。"
+                                + git_next
+                                + "不要为了“再确认一次”重复执行同一 git 命令。"
                             )
                         else:
                             # 非 git 的普通重复调用：同样注入结构化收敛提醒，
