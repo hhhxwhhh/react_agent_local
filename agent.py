@@ -1333,6 +1333,35 @@ class ReActAgent:
                                 + git_next
                                 + "不要为了“再确认一次”重复执行同一 git 命令。"
                             )
+                        elif tool_name == "search_files":
+                            # search_files 同参数重复：搜索结果已在上一条 Observation 中，
+                            # 重复搜索不会推进任务。注入专门提醒，引导模型改用
+                            # read_file 的 start_line/end_line 精确区间读取，
+                            # 避免 blind_read_loop / duplicate_actions 耗尽轮次。
+                            search_next = (
+                                "请立即改用 read_file 的 start_line/end_line "
+                                "精确读取目标区间，或基于已有 Observation 直接落盘"
+                                "（apply_patch / edit_lines / write_file）后用 run_tests 验证。"
+                            )
+                            if self.landed_files and not self.verification_status:
+                                search_next = (
+                                    "你已有非空改动（"
+                                    + "、".join(self.landed_files[:3])
+                                    + "），请立即用 run_tests 验证并收敛交卷。"
+                                )
+                            elif self.landed_files and self.verification_status:
+                                search_next = (
+                                    "改动已落盘且已通过验证（"
+                                    + self.verification_status
+                                    + "），请立即输出 Final Answer，不要再重复调用。"
+                                )
+                            observation = (
+                                "[系统] 你刚刚已经用完全相同的参数调用过 "
+                                "search_files，结果已在上一条 Observation 中。"
+                                "重复搜索不会推进任务。收敛提醒："
+                                + search_next
+                                + " 禁止再次重复同一 search_files 调用。"
+                            )
                         else:
                             # 非 git 的普通重复调用：同样注入结构化收敛提醒，
                             # 依据 landed_files / verification_status 给出唯一动作，
