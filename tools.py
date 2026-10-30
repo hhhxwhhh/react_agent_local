@@ -2250,12 +2250,15 @@ def write_file(
         final_text = _read_text_file(target) + text
     else:
         final_text = text
-    _guarded_write_text(target, final_text, newline="\n")
+    summary = _guarded_write_text(target, final_text, newline="\n")
 
-    return (
+    message = (
         f"已{action}：{_display_path(target)}"
         f"（{len(text)} 字符，文件共 {target.stat().st_size} 字节）"
     )
+    if summary:
+        message = message + "\n" + summary
+    return message
 
 
 def edit_file(
@@ -2400,12 +2403,15 @@ def edit_lines(
     )
 
     # 统一写盘入口：语法护栏 + 原子写 + 读历史失效。
-    _guarded_write_text(target, text_out, newline=newline)
-    return (
+    summary = _guarded_write_text(target, text_out, newline=newline)
+    message = (
         f"已按行{mode}：{_display_path(target)}"
         f"（起始行 {start}，结束行 {end}，写入 {len(new_lines)} 行，"
         f"文件共 {len(updated_lines)} 行 / {target.stat().st_size} 字节）"
     )
+    if summary:
+        message = message + "\n" + summary
+    return message
 
 
 def check_python_syntax(path: str | Path, text: str) -> None:
@@ -2427,14 +2433,103 @@ def check_python_syntax(path: str | Path, text: str) -> None:
         ) from exc
 
 
-def _guarded_write_text(target: Path, text: str, *, newline: str = "") -> None:
-    """统一写盘入口：语法护栏 + 原子写 + 读历史失效。
+def _ast_signature(node: ast.AST) -> str:
+    """把函数/类节点压成一行签名，用于新旧结构对比。"""
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        args = node.args
+        parts: list[str] = []
+        for arg in list(args.posonlyargs) + list(args.args):
+            parts.append(arg.arg)
+        if args.vararg is not None:
+            parts.append("*" + args.vararg.arg)
+        elif args.kwonlyargs:
+            parts.append("*")
+        for arg in args.kwonlyargs:
+            parts.append(arg.arg)
+        if args.kwarg is not None:
+            parts.append("**" + args.kwarg.arg)
+        prefix = "async def" if isinstance(node, ast.AsyncFunctionDef) else "def"
+        return f"{prefix} {node.name}({', '.join(parts)})"
+    if isinstance(node, ast.ClassDef):
+        bases = []
+        for base in node.bases:
+            try:
+                bases.append(ast.unparse(base))
+            except Exception:
+                bases.append("?")
+        return f"class {node.name}({', '.join(bases)})"
+    return getattr(node, "name", "?")
+
+
+def _collect_top_level_defs(tree: ast.AST) -> dict[str, str]:
+    """收集模块顶层（含类内一层）的函数/类签名，键为限定名。"""
+    found: dict[str, str] = {}
+    for node in getattr(tree, "body", []):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            found[node.name] = _ast_signature(node)
+            if isinstance(node, ast.ClassDef):
+                for sub in node.body:
+                    if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        found[f"{node.name}.{sub.name}"] = _ast_signature(sub)
+    return found
+
+
+def _ast_diff_summary(path: str | Path, old_text: str, new_text: str) -> str:
+    """写 .py 前的 AST 结构预演：新增/删除/签名变化。
+
+    非 .py、旧文本为空或解析失败时返回空串（不阻断写入）。
+    """
+    target = Path(path)
+    if target.suffix.lower() != ".py" or not old_text:
+        return ""
+    try:
+        old_tree = ast.parse(old_text, filename=str(target))
+        new_tree = ast.parse(new_text, filename=str(target))
+    except SyntaxError:
+        return ""
+    old_defs = _collect_top_level_defs(old_tree)
+    new_defs = _collect_top_level_defs(new_tree)
+    added = [name for name in new_defs if name not in old_defs]
+    removed = [name for name in old_defs if name not in new_defs]
+    changed = [
+        name
+        for name in new_defs
+        if name in old_defs and old_defs[name] != new_defs[name]
+    ]
+    if not (added or removed or changed):
+        return ""
+    lines = [f"AST 结构预演：{_display_path(target)}"]
+    if added:
+        lines.append("  新增：" + "、".join(f"{n}（{new_defs[n]}）" for n in added))
+    if removed:
+        lines.append("  删除：" + "、".join(f"{n}（{old_defs[n]}）" for n in removed))
+    if changed:
+        lines.append(
+            "  签名变化："
+            + "、".join(
+                f"{n}：{old_defs[n]} -> {new_defs[n]}" for n in changed
+            )
+        )
+    return "\n".join(lines)
+
+
+def _guarded_write_text(target: Path, text: str, *, newline: str = "") -> str:
+    """统一写盘入口：语法护栏 + AST 结构预演 + 原子写 + 读历史失效。
 
     所有写盘路径都应经过这里，避免未来新增写工具漏加护栏。
+    返回 AST 结构预演摘要（无变化或非 .py 时为空串）。
     """
     check_python_syntax(target, text)
+    old_text = ""
+    try:
+        if target.exists() and target.is_file():
+            old_text = target.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        old_text = ""
+    summary = _ast_diff_summary(target, old_text, text)
     _atomic_write_text(target, text, newline=newline)
     _forget_read_history(target)
+    return summary
 
 
 def _atomic_write_text(target: Path, text: str, *, newline: str = "") -> None:
@@ -2541,11 +2636,14 @@ def apply_patch(
         check_python_syntax(path, _restore_newlines(current[path], newlines[path]))
 
     written: list[Path] = []
+    summaries: list[str] = []
     try:
         for path in changed:
-            _guarded_write_text(
+            summary = _guarded_write_text(
                 path, _restore_newlines(current[path], newlines[path]), newline=""
             )
+            if summary:
+                summaries.append(summary)
             written.append(path)
     except Exception:
         # 多文件不是严格事务，但至少把已经写过的文件恢复原状。
@@ -2562,6 +2660,7 @@ def apply_patch(
             f"- {_display_path(path)}（替换 {replacements[path]} 处，"
             f"{path.stat().st_size} 字节）"
         )
+    lines.extend(summaries)
     return "\n".join(lines)
 
 
