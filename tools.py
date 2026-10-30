@@ -1894,14 +1894,21 @@ SEARCH_SKIP_DIRS = {
 def _resolve_path(path: str) -> Path:
     """把绝对路径或相对路径解析成本机路径。
 
-    unrestricted 模式下不做目录包含检查；workspace 模式保留旧沙箱行为。
+    unrestricted 模式下不做目录包含检查；root 模式限制在 FILE_ROOT 内；
+    workspace 模式保留旧沙箱行为。
     """
     raw = str(path or ".").strip()
     candidate = Path(raw).expanduser()
     if not candidate.is_absolute():
         candidate = Path(FILE_ROOT).expanduser().resolve() / candidate
     candidate = candidate.resolve(strict=False)
-    if FILE_ACCESS_MODE == "workspace":
+    if FILE_ACCESS_MODE == "root":
+        root = Path(FILE_ROOT).expanduser().resolve()
+        if candidate != root and root not in candidate.parents:
+            raise ValueError(
+                "FILE_ACCESS_MODE=root 时，路径必须位于 FILE_ROOT 目录内"
+            )
+    elif FILE_ACCESS_MODE == "workspace":
         workspace = WORKSPACE_DIR.resolve()
         if candidate != workspace and workspace not in candidate.parents:
             raise ValueError(
@@ -1946,10 +1953,22 @@ def _is_within_workspace(path: Path) -> bool:
     return resolved == workspace or workspace in resolved.parents
 
 
+def _is_within_root(path: Path) -> bool:
+    """解析符号链接后仍位于 FILE_ROOT 内，才允许访问。"""
+    try:
+        resolved = path.resolve()
+        root = Path(FILE_ROOT).expanduser().resolve()
+    except OSError:
+        return False
+    return resolved == root or root in resolved.parents
+
+
 def _is_path_allowed(path: Path) -> bool:
-    if FILE_ACCESS_MODE != "workspace":
-        return True
-    return _is_within_workspace(path)
+    if FILE_ACCESS_MODE == "root":
+        return _is_within_root(path)
+    if FILE_ACCESS_MODE == "workspace":
+        return _is_within_workspace(path)
+    return True
 
 
 def _request_permission(

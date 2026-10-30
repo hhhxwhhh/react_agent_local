@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import sys
@@ -409,6 +410,40 @@ class TestFileTools(unittest.TestCase):
                 write_file("../evil.txt", "x")
             with self.assertRaises(ValueError):
                 search_files("x", "../")
+
+    def test_root_mode_is_limited_to_file_root(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            with (
+                patch.object(tools, "FILE_ROOT", root),
+                patch.object(tools, "FILE_ACCESS_MODE", "root"),
+            ):
+                write_file("inside.txt", "inside-ok")
+                self.assertIn("inside-ok", read_file("inside.txt"))
+                with self.assertRaises(ValueError):
+                    read_file("../outside.txt")
+                with self.assertRaises(ValueError):
+                    write_file(str(root.parent / "outside.txt"), "x")
+                with self.assertRaises(ValueError):
+                    list_files(str(root.parent))
+
+    def test_usage_json_has_flat_token_fields(self):
+        class Stub:
+            last_usage = {
+                "prompt_tokens": 12,
+                "completion_tokens": 7,
+                "total_tokens": 19,
+            }
+            last_llm_calls = 2
+
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp) / "usage.json"
+            agent_module._write_usage_json(str(target), Stub())
+            payload = json.loads(target.read_text(encoding="utf-8"))
+        self.assertEqual(payload["input_tokens"], 12)
+        self.assertEqual(payload["output_tokens"], 7)
+        self.assertEqual(payload["total_tokens"], 19)
+        self.assertEqual(payload["llm_calls"], 2)
 
     def test_unrestricted_mode_allows_absolute_path_outside_workspace(self):
         with tempfile.TemporaryDirectory() as temp:

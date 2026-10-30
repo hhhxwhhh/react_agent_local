@@ -38,9 +38,12 @@ MAX_CONCURRENT_RUNS = max(1, int(os.getenv("MAX_CONCURRENT_RUNS", "3")))
 # 调用 get_location 时等待用户在界面上授权浏览器定位的时长；超时回退到 IP 定位。
 LOCATION_PERMISSION_TIMEOUT = max(5, int(os.getenv("LOCATION_PERMISSION_TIMEOUT", "90")))
 
-# 文件访问范围：unrestricted 允许本机任意绝对路径；workspace 恢复旧的文件沙箱。
+# 文件访问范围：
+# - unrestricted：允许本机任意绝对路径；
+# - root：只允许 FILE_ROOT 子树（基准测试/容器内使用）；
+# - workspace：恢复旧的 workspace 目录沙箱。
 FILE_ACCESS_MODE = os.getenv("FILE_ACCESS_MODE", "unrestricted").strip().lower()
-if FILE_ACCESS_MODE not in {"unrestricted", "workspace"}:
+if FILE_ACCESS_MODE not in {"unrestricted", "root", "workspace"}:
     FILE_ACCESS_MODE = "unrestricted"
 # 相对路径的基准目录；默认项目根目录。
 FILE_ROOT = Path(os.getenv("FILE_ROOT", str(BASE_DIR))).expanduser().resolve()

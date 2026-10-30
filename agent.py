@@ -1895,6 +1895,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="完全跳过授权模式，自动允许所有工具（高风险，仅限受信任任务）",
     )
     parser.add_argument(
+        "--usage-json",
+        default="",
+        help="把本轮 token 用量和模型调用次数写入指定 JSON 文件（供基准测试读取）",
+    )
+    parser.add_argument(
         "--check-tools", action="store_true", help="只检查本地工具，不需要 API Key"
     )
     return parser
@@ -2023,6 +2028,34 @@ def _repl(agent: ReActAgent) -> int:
     return 0
 
 
+def _write_usage_json(path: str, agent: ReActAgent) -> None:
+    """把本轮用量写成稳定的扁平结构，供基准测试/外部脚本读取。"""
+    if not path:
+        return
+    usage = agent.last_usage if isinstance(agent.last_usage, dict) else {}
+    numeric = {
+        str(key): int(value)
+        for key, value in usage.items()
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+    }
+    payload = {
+        "usage": usage,
+        "llm_calls": int(agent.last_llm_calls or 0),
+        "input_tokens": numeric.get("prompt_tokens", 0),
+        "output_tokens": numeric.get("completion_tokens", 0),
+        "total_tokens": numeric.get("total_tokens", 0),
+    }
+    try:
+        target = os.path.abspath(os.path.expanduser(path))
+        parent = os.path.dirname(target)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(target, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+    except OSError as exc:
+        print(_yellow(f"[用量写入失败] {exc}"))
+
+
 def main(argv: list[str] | None = None) -> int:
     # 输出统一用 UTF-8，避免 Windows 下重定向/管道时中文乱码
     if hasattr(sys.stdout, "reconfigure"):
@@ -2063,6 +2096,8 @@ def main(argv: list[str] | None = None) -> int:
         except KeyboardInterrupt:
             print("\n已取消。")
             return 130
+        finally:
+            _write_usage_json(args.usage_json, agent)
         return 0
 
     return _repl(agent)

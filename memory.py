@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, TypeVar
@@ -33,7 +34,10 @@ from storage import atomic_write_json, lock_for
 from vector_memory import entry_text, get_store, lexical_overlap, relevance_scores
 
 DATA_DIR = BASE_DIR / "data"
-GLOBAL_MEMORY_FILE = DATA_DIR / "memory.json"
+# AGENT_MEMORY_FILE 主要供基准测试/临时会话隔离记忆；默认仍是 data/memory.json。
+GLOBAL_MEMORY_FILE = Path(
+    os.getenv("AGENT_MEMORY_FILE", str(DATA_DIR / "memory.json"))
+).expanduser()
 LEGACY_GLOBAL_MEMORY_FILE = BASE_DIR / "workspace" / "memory.json"
 
 # 单个范围（全局或某个会话）最多保留多少条记忆。
