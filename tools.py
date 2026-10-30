@@ -3144,6 +3144,45 @@ def _run_capture(
     return process.returncode, output, elapsed, timed_out
 
 
+_UNITTEST_FAIL_RE = re.compile(
+    r"^(?:FAIL|ERROR):\s+\S+\s+\(([A-Za-z_][\w.]*)"
+)
+
+
+def _minimal_rerun_hint(output: str, max_modules: int = 5) -> str:
+    """从 unittest 输出中解析失败用例所属模块，生成最小重跑建议。
+
+    只读、纯字符串处理：识别形如
+    ``FAIL: test_x (tests.test_foo.TestBar)`` 或
+    ``ERROR: test_x (tests.test_foo)`` 的行，提取模块名去重，
+    输出可直接交给 run_tests(pattern=...) 的命令。解析不到时返回空串。
+    """
+    modules: list[str] = []
+    seen: set[str] = set()
+    for line in str(output or "").splitlines():
+        m = _UNITTEST_FAIL_RE.match(line.strip())
+        if not m:
+            continue
+        dotted = m.group(1)
+        # 去掉类名：tests.test_foo.TestBar -> tests.test_foo
+        parts = dotted.split(".")
+        if len(parts) >= 2 and parts[-1][:1].isupper():
+            module = ".".join(parts[:-1])
+        else:
+            module = dotted
+        if module and module not in seen:
+            seen.add(module)
+            modules.append(module)
+        if len(modules) >= max_modules:
+            break
+    if not modules:
+        return ""
+    lines = [f"最小重跑建议（{len(modules)} 个失败模块，避免全量重跑）："]
+    for mod in modules:
+        lines.append(f"  run_tests(pattern=\"{mod}\")")
+    return "\n".join(lines)
+
+
 def run_tests(
     pattern: str = "",
     cwd: str = "",
@@ -3185,12 +3224,17 @@ def run_tests(
         status = "结果：通过"
     else:
         status = f"结果：失败（退出码 {code}）"
-    return (
+    body = (
         f"测试目标：{pattern or 'discover tests/'}\n"
         f"目录：{workdir}\n"
         f"{status}\n"
         f"耗时：{elapsed:.2f}s\n\n{output}"
     )
+    if code != 0 and not timed_out:
+        hint = _minimal_rerun_hint(output)
+        if hint:
+            body = body + "\n\n" + hint
+    return body
 
 
 _GIT_READONLY = {"status", "diff", "log", "show", "rev_parse", "branch_list"}
