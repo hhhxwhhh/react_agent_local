@@ -383,3 +383,103 @@ def format_rename_plan(plan: RenamePlan, dry_run: bool) -> str:
         nums = ", ".join(str(n) for n in f.lines)
         lines.append(f"{f.label}: 行 {nums}")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# 模块导入关系查询：找出所有导入了指定模块的文件
+# ---------------------------------------------------------------------------
+
+
+def _module_matches(name: str, target: str) -> bool:
+    """判断导入的模块名是否指向 target（支持点号形式与子模块前缀）。"""
+    if not name or not target:
+        return False
+    if name == target:
+        return True
+    # import pkg.mod 时，target=pkg 也应命中（导入子模块即导入了包）
+    if name.startswith(target + "."):
+        return True
+    return False
+
+
+def _relative_module_matches(node: ast.ImportFrom, target: str) -> bool:
+    """相对导入匹配：from . import name / from .mod import name。
+
+    相对导入没有绝对模块名，这里用“被导入的名字或模块尾段”与 target
+    的尾段比较，覆盖 from . import name 与本模块名匹配的情况。
+    """
+    tail = target.rsplit(".", 1)[-1]
+    if node.module:
+        mod_tail = node.module.rsplit(".", 1)[-1]
+        if mod_tail == tail or node.module == target:
+            return True
+    for alias in node.names:
+        if alias.name == tail or alias.name == target:
+            return True
+    return False
+
+
+def find_importers(
+    root: Path,
+    module: str,
+    max_results: int = 100,
+) -> str:
+    """用 AST 找出所有导入了指定模块的 Python 文件，返回 file:line 与语句。"""
+    module = str(module or "").strip()
+    if not module:
+        raise ValueError("module 不能为空")
+
+    limit = max(1, min(int(max_results), 200))
+    files = _iter_python_files(root)
+    if not files:
+        return f"没有找到 Python 文件：{root}"
+    base = root if root.is_dir() else root.parent
+
+    hits: list[tuple[str, int, str]] = []
+    total = 0
+    for path in files:
+        tree = _parse(path)
+        if tree is None:
+            continue
+        try:
+            source_lines = path.read_text(
+                encoding="utf-8", errors="replace"
+            ).splitlines()
+        except OSError:
+            continue
+        for node in ast.walk(tree):
+            matched = False
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if _module_matches(alias.name, module):
+                        matched = True
+                        break
+            elif isinstance(node, ast.ImportFrom):
+                if node.level and node.level > 0:
+                    matched = _relative_module_matches(node, module)
+                elif node.module and _module_matches(node.module, module):
+                    matched = True
+            if not matched:
+                continue
+            total += 1
+            if len(hits) >= limit:
+                continue
+            lineno = int(getattr(node, "lineno", 0) or 0)
+            snippet = ""
+            if 0 < lineno <= len(source_lines):
+                snippet = source_lines[lineno - 1].strip()[:160]
+            try:
+                label = path.relative_to(base).as_posix()
+            except ValueError:
+                label = path.name
+            hits.append((label, lineno, snippet))
+
+    if not total:
+        return f"没有找到导入模块“{module}”的文件（扫描 {len(files)} 个 .py）"
+    lines = [f"导入模块“{module}”：共 {total} 处，显示前 {len(hits)} 处"]
+    for name, lineno, snippet in hits:
+        suffix = f"  {snippet}" if snippet else ""
+        lines.append(f"{name}:{lineno}{suffix}")
+    if total > len(hits):
+        lines.append(f"…还有 {total - len(hits)} 处未显示，可缩小 path 或提高 max_results")
+    return "\n".join(lines)

@@ -2736,6 +2736,20 @@ def find_references(
     )
 
 
+def find_importers(
+    module: str,
+    path: str = ".",
+    max_results: int = 100,
+) -> str:
+    """用 AST 找出所有导入了指定模块的 Python 文件，返回 文件:行号 与导入语句。"""
+    target = _resolve_path(path)
+    if not target.exists():
+        raise ValueError(f"路径不存在：{_display_path(target)}")
+    if not _is_path_allowed(target):
+        raise ValueError(f"路径不在允许访问的范围内：{_display_path(target)}")
+    return code_nav.find_importers(target, module, max_results=max_results)
+
+
 def rename_symbol(
     old: str,
     new: str,
@@ -4148,6 +4162,27 @@ TOOL_SPECS: dict[str, dict] = {
             "required": ["symbol"],
         },
     },
+    "find_importers": {
+        "description": "用 AST 找出所有导入了指定模块的 Python 文件，返回 文件:行号 与对应导入语句。支持 import m / import m as a / from m import n / from m import n as a，module 支持点号形式（如 pkg.mod），并支持 from . import name 这类相对导入。适合评估改动影响范围、确认模块被谁依赖。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "module": {
+                    "type": "string",
+                    "description": "要查询的模块名，例如 code_nav 或 pkg.mod",
+                },
+                "path": {
+                    "type": "string",
+                    "description": "搜索起点，默认 .（项目根目录）",
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "最多返回多少处，1-200，默认 100",
+                },
+            },
+            "required": ["module"],
+        },
+    },
     "rename_symbol": {
         "description": "用 AST 安全重命名 Python 符号：只改 def/class/import/Name/Attribute 中的目标符号，字符串和注释里的同名文本保持不变。dry_run=True 只返回计划不写盘，False 才落盘。",
         "parameters": {
@@ -4567,6 +4602,7 @@ TOOL_FUNCS: dict[str, Callable[..., str]] = {
     "search_files": search_files,
     "repo_map": repo_map,
     "find_references": find_references,
+    "find_importers": find_importers,
     "rename_symbol": rename_symbol,
     "project_overview": project_overview,
     "import_graph": import_graph,
