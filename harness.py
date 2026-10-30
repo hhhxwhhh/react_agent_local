@@ -382,12 +382,22 @@ def classify_convergence_after_duplicate_block(trace: list[dict] | None) -> dict
             advice += (
                 "收敛率达标：运行时双保险有效，可保持现状并继续观察。"
             )
+    # 用收敛率数据决定只读 git 重复拦截阈值：收敛率低说明模型被拦截后仍
+    # 继续探索，应把阈值提前到 2（第 2 次重复即强制转向 run_tests）；收敛率
+    # 达标说明现有阈值足够，保持 3 以免过早打断正常探索。
+    recommended_threshold = 2 if (blocked > 0 and rate < 0.5) else 3
+    if category:
+        advice += (
+            " 阈值建议：recommended_threshold=%d（收敛率 %.0f%%）。"
+            % (recommended_threshold, rate * 100)
+        )
     return {
         "blocked": blocked,
         "converged": converged,
         "rate": rate,
         "category": category,
         "advice": advice,
+        "recommended_threshold": recommended_threshold,
     }
 
 
