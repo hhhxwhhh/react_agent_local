@@ -222,11 +222,11 @@ def _log_new_entries(log, before: int) -> None:
         _log(log, f"第 {generation} 代：{decision}；{reason}")
 
 
-def _run_once(log) -> int:
+def _run_once(log, max_steps: int | None = None, max_diff_lines: int | None = None) -> int:
     if not _preflight(log):
         return 2
     before = len(_ledger_entries())
-    returncode = _run_generation(log)
+    returncode = _run_generation(log, max_steps, max_diff_lines)
     _log_new_entries(log, before)
     return 0 if returncode == 0 else returncode
 
@@ -375,7 +375,7 @@ def main(argv: list[str] | None = None) -> int:
                 return 0 if ok else 2
             if args.once:
                 _log(log, "手动模式：立即运行一代。")
-                return _run_once(log)
+                return _run_once(log, args.max_steps, args.max_diff_lines)
             return _run_window(args, log)
         finally:
             _release_lock()
