@@ -477,10 +477,12 @@ def classify_precheck_read_reminder(trace: list[dict] | None) -> dict:
     }
 
 
-# 工具定位速查：把最常用的验证工具 run_tests 的 TOOL_SPECS 原文与行号直接
-# 写进任务描述，减少下一代在 tools.py 里反复 search_files/read_file 定位的
-# 只读轮次（blind_read_loop 的主要成因之一）。
+# 工具定位速查：把最常用的“落盘+验证”核心工具（apply_patch / edit_lines /
+# run_tests）的 TOOL_SPECS 原文与行号直接写进任务描述，减少下一代在 tools.py
+# 里反复 search_files/read_file 定位的只读轮次（blind_read_loop 的主要成因之一）。
 RUN_TESTS_SPEC_LINES = "tools.py L4537-L4557"
+APPLY_PATCH_SPEC_LINES = "tools.py L4504-L4535"
+EDIT_LINES_SPEC_LINES = "tools.py L4345-L4372"
 RUN_TESTS_SPEC_SNIPPET = (
     '    "run_tests": {\n'
     '        "description": "运行项目测试套件并返回结构化结果。默认执行 '
@@ -500,23 +502,75 @@ RUN_TESTS_SPEC_SNIPPET = (
     '    },'
 )
 
+APPLY_PATCH_SPEC_SNIPPET = (
+    '    "apply_patch": {\n'
+    '        "description": "原子地批量修改多个文件：一次提交多个精确文本替换，任一 old_text 校验失败则整批不落盘。适合自进化时跨文件重构。会先请求一次用户授权。",\n'
+    '        "parameters": {\n'
+    '            "type": "object",\n'
+    '            "properties": {\n'
+    '                "patches": {\n'
+    '                    "type": "array",\n'
+    '                    "description": "要应用的修改列表，按顺序执行；同一个文件可出现多次",\n'
+    '                    "items": {\n'
+    '                        "type": "object",\n'
+    '                        "properties": {\n'
+    '                            "path": {"type": "string", "description": "文件路径"},\n'
+    '                            "old_text": {"type": "string", "description": "要替换的原文，需包含足够上下文"},\n'
+    '                            "new_text": {"type": "string", "description": "替换后的文本"},\n'
+    '                            "replace_all": {"type": "boolean", "description": "是否替换全部匹配，默认 false"},\n'
+    '                        },\n'
+    '                        "required": ["path", "old_text", "new_text"],\n'
+    '                    },\n'
+    '                }\n'
+    '            },\n'
+    '            "required": ["patches"],\n'
+    '        },\n'
+    '        "context": True,\n'
+    '    },'
+)
+EDIT_LINES_SPEC_SNIPPET = (
+    '    "edit_lines": {\n'
+    '        "description": "按行号修改文件，专为多行内容设计：把每一行作为独立的 lines 元素传入，JSON 里不含裸换行，避免 Action Input 被截断。start_line=0 时整体覆盖；start_line>=1 且 end_line=0 时在第 start_line 行之后插入；end_line>=start_line 时替换闭区间。修改前应先 read_file 确认行号。",\n'
+    '        "parameters": {\n'
+    '            "type": "object",\n'
+    '            "properties": {\n'
+    '                "path": {"type": "string", "description": "文件路径"},\n'
+    '                "lines": {\n'
+    '                    "type": "array",\n'
+    '                    "description": "要写入的行；每个元素必须是不含换行的单行字符串",\n'
+    '                    "items": {"type": "string"},\n'
+    '                },\n'
+    '                "start_line": {"type": "integer", "description": "起始行号（1-based）；0 表示整体覆盖"},\n'
+    '                "end_line": {"type": "integer", "description": "结束行号（含）；0 表示插入到 start_line 之后"},\n'
+    '            },\n'
+    '            "required": ["path", "lines"],\n'
+    '        },\n'
+    '        "context": True,\n'
+    '    },'
+)
 
 def tool_locator_block() -> str:
-    """返回 run_tests 的 TOOL_SPECS 原文片段与行号速查块。
+    """返回 apply_patch / edit_lines / run_tests 的 TOOL_SPECS 原文片段与行号速查块。
 
-    纯函数、无副作用，便于单测。内容与 tools.py 中 TOOL_SPECS 的 run_tests
-    条目保持一致；若 tools.py 结构变化，只需同步本常量。
+    把三个“落盘+验证”核心工具的 spec 原文直接写进任务描述，减少下一代在
+    tools.py 里反复 search_files/read_file 定位的只读轮次。
     """
     return (
-        "\n## 工具定位速查（减少只读定位轮次）\n"
+        "## 工具定位速查（减少只读定位轮次）\n"
+        f"- `apply_patch` 的 TOOL_SPECS 定义位于 {APPLY_PATCH_SPEC_LINES}，原文如下：\n"
+        "```python\n"
+        f"{APPLY_PATCH_SPEC_SNIPPET}\n"
+        "```\n"
+        f"- `edit_lines` 的 TOOL_SPECS 定义位于 {EDIT_LINES_SPEC_LINES}，原文如下：\n"
+        "```python\n"
+        f"{EDIT_LINES_SPEC_SNIPPET}\n"
+        "```\n"
         f"- `run_tests` 的 TOOL_SPECS 定义位于 {RUN_TESTS_SPEC_LINES}，原文如下：\n"
         "```python\n"
         f"{RUN_TESTS_SPEC_SNIPPET}\n"
         "```\n"
-        "- 需要验证改动时直接调用 `run_tests`（默认跑全量），不要为了确认它的"
-        "参数而反复 search_files/read_file；参数已在上方给出。\n"
+        "- 需要验证改动时直接调用 `run_tests`（默认跑全量），不要为了确认它的参数而反复 search_files/read_file；参数已在上方给出。\n"
     )
-
 
 def default_objective() -> str:
     """返回没有显式目标时使用的默认改进目标。"""
