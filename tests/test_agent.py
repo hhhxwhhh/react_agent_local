@@ -36,6 +36,7 @@ from tools import (  # noqa: E402
     delete_file,
     edit_file,
     edit_lines,
+    find_references,
     get_current_time,
     git,
     list_files,
@@ -43,6 +44,7 @@ from tools import (  # noqa: E402
     read_file,
     recall,
     remember,
+    repo_map,
     run_command,
     run_tests,
     run_tool,
@@ -186,7 +188,7 @@ class TestTools(unittest.TestCase):
         self.assertIn("未知工具", result)
 
         # 内部实现可以保留，但不能重新进入 Agent 的动作空间。
-        self.assertEqual(len(tools.TOOL_SPECS), 16)
+        self.assertEqual(len(tools.TOOL_SPECS), 18)
         self.assertFalse(tools.INTERNAL_ONLY_TOOLS & set(tools.TOOL_SPECS))
         self.assertFalse(tools.INTERNAL_ONLY_TOOLS & set(tools.TOOL_FUNCS))
         for removed in tools.INTERNAL_ONLY_TOOLS:
@@ -589,6 +591,56 @@ class TestFileTools(unittest.TestCase):
 
         missing = search_files("不存在的关键词", self.folder)
         self.assertIn("没有找到", missing)
+
+    def test_repo_map_lists_symbols_and_skips_cache_dirs(self):
+        write_file(
+            f"{self.folder}/pkg/mod.py",
+            "class Greeter:\n"
+            "    def greet(self, name):\n"
+            "        return name\n"
+            "\n"
+            "async def fetch(url, timeout=1):\n"
+            "    return url\n"
+            "\n"
+            "def _helper(*args, **kwargs):\n"
+            "    return args\n",
+        )
+        write_file(f"{self.folder}/pkg/__pycache__/hidden.py", "def hidden(): pass\n")
+
+        result = repo_map(self.folder)
+        self.assertIn("pkg/mod.py", result)
+        self.assertIn("L1 class Greeter", result)
+        self.assertIn("L2 def greet(self, name)", result)
+        self.assertIn("L5 async def fetch(url, timeout)", result)
+        self.assertIn("L8 def _helper(*args, **kwargs)", result)
+        self.assertNotIn("hidden", result)
+
+    def test_repo_map_reports_missing_symbols(self):
+        write_file(f"{self.folder}/empty.py", "VALUE = 1\n")
+        result = repo_map(self.folder)
+        self.assertIn("没有解析到类或函数定义", result)
+
+    def test_find_references_reports_definitions_and_calls(self):
+        write_file(
+            f"{self.folder}/lib/a.py",
+            "def target():\n    pass\n",
+        )
+        write_file(
+            f"{self.folder}/lib/b.py",
+            "from a import target\n\n\ndef wrapper():\n    return target()\n",
+        )
+
+        result = find_references("target", self.folder)
+        self.assertIn("a.py:1 [定义]", result)
+        self.assertIn("b.py:1 [引用]", result)
+        self.assertIn("b.py:5 [引用]", result)
+
+        missing = find_references("never_defined", self.folder)
+        self.assertIn("没有找到符号", missing)
+
+    def test_find_references_rejects_invalid_symbol(self):
+        with self.assertRaises(ValueError):
+            find_references("os.system('x')", self.folder)
 
     def test_search_does_not_follow_symlink_outside_workspace(self):
         workspace_dir = WORKSPACE_DIR / self.folder

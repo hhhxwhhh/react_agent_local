@@ -167,7 +167,7 @@ def _ledger_entries() -> list[dict]:
     return entries
 
 
-def _run_generation(log) -> int:
+def _run_generation(log, max_steps: int | None = None, max_diff_lines: int | None = None) -> int:
     cmd = [
         sys.executable,
         "-X",
@@ -179,6 +179,11 @@ def _run_generation(log) -> int:
         "--yes",
         "--no-color",
     ]
+    # 批量调度时把预算显式传下去，避免只能改冻结的 config.py 才能放大尺度。
+    if max_steps is not None:
+        cmd += ["--max-steps", str(max_steps)]
+    if max_diff_lines is not None:
+        cmd += ["--max-diff-lines", str(max_diff_lines)]
     env = dict(os.environ)
     env["PYTHONIOENCODING"] = "utf-8"
     # 计划任务的 PATH 可能比交互式终端短；显式补上当前解释器目录，
@@ -263,7 +268,7 @@ def _run_window(args, log) -> int:
 
         _log(log, f"开始第 {completed + 1}/{args.max_generations} 代。")
         before = len(_ledger_entries())
-        returncode = _run_generation(log)
+        returncode = _run_generation(log, args.max_steps, args.max_diff_lines)
         _log_new_entries(log, before)
         if returncode != 0:
             _log(log, f"evolution.py 返回 {returncode}，停止本日调度。")
@@ -300,6 +305,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help="等待窗口时的轮询间隔",
     )
     parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=None,
+        help="每代最大 ReAct 步数（透传 evolution.py；默认用 config.py 的值）",
+    )
+    parser.add_argument(
+        "--max-diff-lines",
+        type=int,
+        default=None,
+        help="每代最大改动行数（透传 evolution.py；默认用 config.py 的值）",
+    )
+    parser.add_argument(
         "--once",
         action="store_true",
         help="立即运行一代并退出，不等待时间窗口（用于手动验证）",
@@ -329,6 +346,10 @@ def main(argv: list[str] | None = None) -> int:
     args.max_generations = max(1, int(args.max_generations))
     args.min_minutes_left = max(1, int(args.min_minutes_left))
     args.poll_seconds = max(5.0, float(args.poll_seconds))
+    if args.max_steps is not None:
+        args.max_steps = max(5, int(args.max_steps))
+    if args.max_diff_lines is not None:
+        args.max_diff_lines = max(10, int(args.max_diff_lines))
 
     SCHEDULER_DIR.mkdir(parents=True, exist_ok=True)
     log_path = SCHEDULER_DIR / f"{datetime.now():%Y-%m-%d}.log"

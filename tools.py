@@ -35,6 +35,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import requests
 
+import code_nav
 from config import (
     BASE_DIR,
     COMMAND_MAX_OUTPUT_CHARS,
@@ -2697,6 +2698,42 @@ def search_files(
     return "\n".join(lines)
 
 
+def repo_map(
+    path: str = ".",
+    max_files: int = 40,
+    max_symbols: int = 200,
+) -> str:
+    """列出 Python 文件中的类/函数及其行号，用于快速定位符号。"""
+    target = _resolve_path(path)
+    if not target.exists():
+        raise ValueError(f"路径不存在：{_display_path(target)}")
+    if not _is_path_allowed(target):
+        raise ValueError("路径不在允许访问的范围内")
+    return code_nav.repo_map(
+        target,
+        max_files=max(1, min(int(max_files), 100)),
+        max_symbols=max(10, min(int(max_symbols), 500)),
+    )
+
+
+def find_references(
+    symbol: str,
+    path: str = ".",
+    max_results: int = 50,
+) -> str:
+    """按 AST 查找一个符号的定义与引用位置。"""
+    target = _resolve_path(path)
+    if not target.exists():
+        raise ValueError(f"路径不存在：{_display_path(target)}")
+    if not _is_path_allowed(target):
+        raise ValueError("路径不在允许访问的范围内")
+    return code_nav.find_references(
+        target,
+        symbol,
+        max_results=max(1, min(int(max_results), 100)),
+    )
+
+
 # ---------------------------------------------------------------------------
 # 本机命令执行（需要用户授权；超时终止进程树）
 # ---------------------------------------------------------------------------
@@ -3449,6 +3486,48 @@ TOOL_SPECS: dict[str, dict] = {
             "required": ["keyword"],
         },
     },
+    "repo_map": {
+        "description": "用 Python AST 生成代码地图：列出目录（或单个文件）中每个模块的类、函数/方法及其行号。改代码前先用它定位符号，避免从头通读大文件；只解析 .py，跳过依赖与缓存目录。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "目录或 .py 文件，默认 .（项目根目录）",
+                },
+                "max_files": {
+                    "type": "integer",
+                    "description": "最多列出多少个文件，1-100，默认 40",
+                },
+                "max_symbols": {
+                    "type": "integer",
+                    "description": "最多列出多少个符号，默认 200",
+                },
+            },
+            "required": [],
+        },
+    },
+    "find_references": {
+        "description": "按 AST 查找一个 Python 符号（函数/类/变量/导入名）的定义与所有引用位置，返回 文件:行号 和代码片段。适合改函数签名或重命名前确认调用点。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "symbol": {
+                    "type": "string",
+                    "description": "要查找的 Python 标识符，例如 parse_output",
+                },
+                "path": {
+                    "type": "string",
+                    "description": "搜索起点，默认 .（项目根目录）",
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "最多返回多少处，1-100，默认 50",
+                },
+            },
+            "required": ["symbol"],
+        },
+    },
     "run_command": {
         "description": "在本机 shell 中执行命令或代码，例如 python -X utf8 -c \"print(1+1)\"、python -X utf8 script.py、node app.js、git status、dir。需要实际运行/验证代码时优先用它；cwd 可为绝对路径，相对路径以项目根目录为基准。会按授权模式自动放行或请求确认，超时后终止进程树。",
         "parameters": {
@@ -3611,6 +3690,8 @@ TOOL_FUNCS: dict[str, Callable[..., str]] = {
     "write_file": write_file,
     "edit_lines": edit_lines,
     "search_files": search_files,
+    "repo_map": repo_map,
+    "find_references": find_references,
     "apply_patch": apply_patch,
     "run_tests": run_tests,
     "git": git,
