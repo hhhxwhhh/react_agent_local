@@ -821,6 +821,42 @@ class ReActAgent:
             "branch_list",
         }
 
+    def _duplicate_next_action(self, tool_name: str, args: dict) -> str:
+        """按工具名查表生成重复调用的唯一动作提醒。
+
+        把原先 git 只读 / search_files / 通用 else 三个分支里重复构造的
+        三态提醒收敛到一处：先按 landed_files / verification_status 决定
+        基础动作，再按工具名追加专属后缀，避免分支膨胀。
+        """
+        if self.landed_files and not self.verification_status:
+            base = (
+                "你已有非空改动（"
+                + "、".join(self.landed_files[:3])
+                + "），请立即用 run_tests 验证并收敛交卷。"
+            )
+        elif self.landed_files and self.verification_status:
+            base = (
+                "改动已落盘且已通过验证（"
+                + self.verification_status
+                + "），请立即输出 Final Answer，不要再重复调用。"
+            )
+        else:
+            base = (
+                "你尚未落盘任何改动，请立即用 write_file / "
+                "edit_lines / apply_patch 落地最小改动，"
+                "再用 run_tests 验证；若任务无需修改，请直接输出 "
+                "Final Answer。"
+            )
+        if self._is_git_readonly_call(tool_name, args):
+            return base + "不要为了“再确认一次”重复执行同一 git 命令。"
+        if tool_name == "search_files":
+            return (
+                base
+                + " 请优先改用 read_file 的 start_line/end_line 精确读取目标区间；"
+                "禁止再次重复同一 search_files 调用。"
+            )
+        return base + " 禁止再次重复同一调用。"
+
     def _summarize_text(
         self,
         task_prompt: str,
@@ -1301,96 +1337,29 @@ class ReActAgent:
                     if call_key in seen_calls:
                         duplicate = True
                         consecutive_duplicates += 1
+                        # 统一策略表：git 只读 / search_files / 普通重复调用
+                        # 共用同一套三态动作提醒，按工具名追加专属后缀，
+                        # 避免三个分支各自重复构造相同文本导致分支膨胀。
                         if self._is_git_readonly_call(tool_name, args):
-                            # 只读 git 命令重复：注入收敛提醒，与 harness.py 的
-                            # duplicate_actions_after_diff 诊断形成双保险。
-                            # 关键：结合 landed_files / verification_status 给出
-                            # 唯一动作，避免“若 diff 非空…若 diff 为空…”的二选一
-                            # 模糊提醒导致模型继续重复 git 调用。
-                            if self.landed_files and not self.verification_status:
-                                git_next = (
-                                    "你已有非空改动（"
-                                    + "、".join(self.landed_files[:3])
-                                    + "），请立即用 run_tests 验证并收敛交卷。"
-                                )
-                            elif self.landed_files and self.verification_status:
-                                git_next = (
-                                    "改动已落盘且已通过验证（"
-                                    + self.verification_status
-                                    + "），请立即输出 Final Answer，不要再重复调用。"
-                                )
-                            else:
-                                git_next = (
-                                    "你尚未落盘任何改动，请立即用 write_file / "
-                                    "edit_lines / apply_patch 落地最小改动，"
-                                    "再用 run_tests 验证；若任务无需修改，请直接输出 "
-                                    "Final Answer。"
-                                )
                             observation = (
                                 "[系统] 你刚刚已经用完全相同的参数执行过 "
                                 f"git {args.get('operation', '')}，结果已在上一条 "
                                 "Observation 中。只读 git 命令重复执行不会推进任务。"
-                                + git_next
-                                + "不要为了“再确认一次”重复执行同一 git 命令。"
+                                + self._duplicate_next_action(tool_name, args)
                             )
                         elif tool_name == "search_files":
-                            # search_files 同参数重复：搜索结果已在上一条 Observation 中，
-                            # 重复搜索不会推进任务。注入专门提醒，引导模型改用
-                            # read_file 的 start_line/end_line 精确区间读取，
-                            # 避免 blind_read_loop / duplicate_actions 耗尽轮次。
-                            search_next = (
-                                "请立即改用 read_file 的 start_line/end_line "
-                                "精确读取目标区间，或基于已有 Observation 直接落盘"
-                                "（apply_patch / edit_lines / write_file）后用 run_tests 验证。"
-                            )
-                            if self.landed_files and not self.verification_status:
-                                search_next = (
-                                    "你已有非空改动（"
-                                    + "、".join(self.landed_files[:3])
-                                    + "），请立即用 run_tests 验证并收敛交卷。"
-                                )
-                            elif self.landed_files and self.verification_status:
-                                search_next = (
-                                    "改动已落盘且已通过验证（"
-                                    + self.verification_status
-                                    + "），请立即输出 Final Answer，不要再重复调用。"
-                                )
                             observation = (
                                 "[系统] 你刚刚已经用完全相同的参数调用过 "
                                 "search_files，结果已在上一条 Observation 中。"
                                 "重复搜索不会推进任务。收敛提醒："
-                                + search_next
-                                + " 禁止再次重复同一 search_files 调用。"
+                                + self._duplicate_next_action(tool_name, args)
                             )
                         else:
-                            # 非 git 的普通重复调用：同样注入结构化收敛提醒，
-                            # 依据 landed_files / verification_status 给出唯一动作，
-                            # 与 prompts.py 规则 4c 的“强制唯一动作模板”形成运行时闭环。
-                            if self.landed_files and not self.verification_status:
-                                next_action = (
-                                    "你已有非空改动（"
-                                    + "、".join(self.landed_files[:3])
-                                    + "），请立即用 run_tests 验证并收敛交卷。"
-                                )
-                            elif self.landed_files and self.verification_status:
-                                next_action = (
-                                    "改动已落盘且已通过验证（"
-                                    + self.verification_status
-                                    + "），请立即输出 Final Answer，不要再重复调用。"
-                                )
-                            else:
-                                next_action = (
-                                    "你尚未落盘任何改动，请立即用 write_file / "
-                                    "edit_lines / apply_patch 落地最小改动，"
-                                    "再用 run_tests 验证；若任务无需修改，请直接输出 "
-                                    "Final Answer。"
-                                )
                             observation = (
                                 "[系统] 你刚刚已经用完全相同的参数调用过 "
                                 f"{tool_name}，结果已在上一条 Observation 中。"
                                 "重复调用不会推进任务。收敛提醒："
-                                + next_action
-                                + " 禁止再次重复同一调用。"
+                                + self._duplicate_next_action(tool_name, args)
                             )
                         # 只读 git 命令 + 已有非空改动 + 尚未验证：第 2 次重复即
                         # 强制收口转向 run_tests。本代诊断 duplicate_actions_after_diff
