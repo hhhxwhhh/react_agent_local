@@ -753,6 +753,25 @@ class ReActAgent:
             "或直接基于已有 Observation 输出 Final Answer。"
         )
 
+    @staticmethod
+    def _persist_read_threshold(path: str) -> int:
+        """按文件大小动态计算“落盘优先”预检的读取次数阈值。
+
+        小文件（< 32KB）保持 3 次；中等文件（32KB-128KB）放宽到 4 次；
+        大文件（>= 128KB）放宽到 5 次。大文件往往需要多次定向读取才能
+        定位符号，固定阈值 3 会误伤正常探索，反而制造 blind_read_loop。
+        读取失败时退回默认阈值 3。
+        """
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            return 3
+        if size >= 128 * 1024:
+            return 5
+        if size >= 32 * 1024:
+            return 4
+        return 3
+
     def _precheck_persist_priority(self, tool_name: str, args: dict) -> str | None:
         """落盘优先预检：反复 read_file 同一文件却迟迟不落盘时注入强制落盘提醒。
 
@@ -770,7 +789,8 @@ class ReActAgent:
             counts = {}
             self._read_path_counts = counts
         counts[path] = counts.get(path, 0) + 1
-        if counts[path] < 3:
+        threshold = self._persist_read_threshold(path)
+        if counts[path] < threshold:
             return None
         if getattr(self, "_persist_happened", False):
             return None
