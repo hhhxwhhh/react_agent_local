@@ -542,6 +542,8 @@ def run_meta_generation(args: argparse.Namespace, generation: int) -> int:
             print(question)
             record["decision"] = "dry-run"
             record["reason"] = "只打印问题，不调用 Agent"
+            _remove_worktree(worktree, branch)
+            worktree = None
             return 0
 
         print(f"[meta] worktree：{worktree}")
@@ -662,7 +664,7 @@ def run_meta_generation(args: argparse.Namespace, generation: int) -> int:
     finally:
         record["finished_at"] = _now()
         record["duration_seconds"] = round(time.monotonic() - started, 2)
-        if record["decision"] in {"accepted", "rejected", "dry-run"}:
+        if record["decision"] in {"accepted", "rejected"}:
             _append_ledger(record)
             _append_doc(record)
 
