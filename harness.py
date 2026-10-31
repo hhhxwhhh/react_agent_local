@@ -35,10 +35,20 @@ EVOLVABLE_HINT = (
     "server.py、web/、docs/、README.md、harness.py，以及新建的 Python 模块。"
 )
 
+META_EVOLVABLE_HINT = (
+    "evolution.py、harness.py、scheduler.py、register_scheduler.ps1，"
+    "以及新增的 meta/ 包和 tests/test_meta_*.py。"
+)
+
 PROTECTED_HINT = (
     "tests/ 下已有的测试文件、evolution.py、evolution_gate.py（如果存在）、"
-    "evaluation.py、config.py、requirements.txt、.gitignore、.env、.env.example、"
-    ".git/、data/。"
+    "meta_gate.py、meta_evolution.py、evaluation.py、config.py、requirements.txt、"
+    ".gitignore、.env、.env.example、.git/、data/、meta/。"
+)
+
+META_BOUNDARY_HINT = (
+    "meta_gate.py、meta_evolution.py、evaluation.py、config.py、agent.py、"
+    "tools.py、prompts.py、已有 tests/、benchmark/、data/、.env、.git/。"
 )
 
 # 工具层 JSON 截断失败的独立诊断类别。
@@ -643,11 +653,16 @@ def build_generation_question(
     trace: list[dict] | None = None,
     task: dict | None = None,
     task_attempt: dict | None = None,
+    meta: bool = False,
+    meta_scope: str = "",
 ) -> str:
     """构造交给当前 Agent 的下一代开发任务。
 
     参数名是 evolution.py 的调用契约，修改时不要改名；新增参数必须带默认值，
     这样冻结的旧版裁判仍能调用。
+
+    `meta=True` 时用于自我托管代：允许修改 evolution.py / harness.py /
+    scheduler.py，但由 worktree 之外的冻结 meta_gate.py 验收。
     """
     target = str(objective or "").strip() or DEFAULT_OBJECTIVE
     task_block = ""
@@ -682,6 +697,39 @@ def build_generation_question(
         "  为什么能提升编码能力、最小验证方式。\n"
     )
     protected = "、".join(str(item) for item in protected_paths if str(item).strip())
+    evolvable_hint = META_EVOLVABLE_HINT if meta else EVOLVABLE_HINT
+    boundary_hint = META_BOUNDARY_HINT if meta else PROTECTED_HINT
+    meta_block = ""
+    if meta:
+        meta_block = (
+            "\n## 自我托管代规则（优先于下方通用边界）\n"
+            "- 你在一个隔离的 git worktree 中修改 Harness 本身；主工作区不会被直接\n"
+            "  改动，只有外层裁判通过后才会快进合入。\n"
+            f"- 本代可改范围：{meta_scope or META_EVOLVABLE_HINT}\n"
+            "- 外层冻结裁判 `meta_gate.py` 会在 worktree 之外独立运行：它回放无改动、\n"
+            "  冻结路径、超预算、安全检查失败、测试回归、测试数量下降、正常接受 7 个\n"
+            "  场景，并跑全量测试；任何判定被削弱都会拒绝。\n"
+            "- 不得修改或读取 `meta_gate.py` / `meta_evolution.py`；不得修改已有测试\n"
+            "  来迁就实现；不得删除、跳过或放宽任何安全检查、路径检查、预算检查、\n"
+            "  测试数量检查和评测门槛。\n"
+            "- 本代允许修改 `evolution.py` / `harness.py` / `scheduler.py`，但普通代\n"
+            "  仍必须拒绝这三者；不要拆掉普通代的保护，否则外层裁判会拒绝。\n"
+            "- 新增辅助模块只能放在 `meta/` 下，新增测试只能命名为 `tests/test_meta_*.py`。\n"
+            "- 最终答案必须写清：改了什么、为什么不会削弱判定、如何验证、回滚路径。\n"
+        )
+    boundary_rule = (
+        "本代是自我托管代：允许修改 evolution.py、harness.py、scheduler.py，但绝对\n"
+        "   不要修改 meta_gate.py、meta_evolution.py、evaluation.py、config.py、agent.py、\n"
+        "   tools.py、prompts.py、已有 tests/、benchmark/、data/、.env。允许新增\n"
+        "   tests/test_meta_*.py，但不得通过减少测试来通过。测试和裁判逻辑是选择信号，\n"
+        "   不是可优化的目标。"
+        if meta
+        else
+        "绝对不要修改、删除或重命名 tests/ 下已有的文件，也不要修改 evolution.py、\n"
+        "   evaluation.py、config.py、requirements.txt、.env 或 data/。允许新增 tests/\n"
+        "   下的 `.py` 测试文件，但不得通过减少测试来通过。测试和裁判逻辑是选择信号，\n"
+        "   不是可优化的目标。"
+    )
     history_text = str(history or "").strip() or "（暂无历史记录；这是第一次自进化。）"
     experience_text = str(experience or "").strip()
     merged_failures = list(tool_failures or [])
@@ -735,13 +783,13 @@ def build_generation_question(
 
 ## 长期目标（所有代共同朝这个方向）
 {LONG_TERM_GOAL}
-{task_block}{innovation_block}{locator_block}
+{task_block}{innovation_block}{locator_block}{meta_block}
 ## 当前基线
 - 仓库根目录：当前工作目录
 - 基线提交：{baseline_commit}
 - 本代最大改动量：约 {max_diff_lines} 行（新增 + 删除）
-- 可进化范围：{EVOLVABLE_HINT}
-- 冻结边界：{protected or PROTECTED_HINT}
+- 可进化范围：{evolvable_hint}
+- 冻结边界：{protected or boundary_hint}
 - 测试目录例外：允许在 tests/ 下**新增**测试文件；已有的测试文件只能读取，
   不能修改、删除或重命名。新增测试必须能通过，且不能通过减少测试来通过。
 {truncation_block}{duplicate_block}{convergence_block}{read_oob_block}{precheck_block}
@@ -808,10 +856,7 @@ def build_generation_question(
 1. 先用 git status / git diff 观察现状，再用 read_file 阅读相关源码和测试。
 2. 只做与目标相关的改动；可以把一个能力做完整（1-3 个文件），但不要顺手重写
    无关模块，不要改测试来迁就实现，也不要用纯文案改动冒充能力提升。
-3. 绝对不要修改、删除或重命名 tests/ 下已有的文件，也不要修改 evolution.py、
-   evaluation.py、config.py、requirements.txt、.env 或 data/。允许新增 tests/
-   下的 `.py` 测试文件，但不得通过减少测试来通过。测试和裁判逻辑是选择信号，
-   不是可优化的目标。
+3. {boundary_rule}
 4. 可以修改 harness.py 来改进下一代策略，但必须保留
    build_generation_question 的关键字参数签名，且新增参数必须带默认值，
    保证冻结的 evolution.py 仍能调用。

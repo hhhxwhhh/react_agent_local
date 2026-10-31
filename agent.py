@@ -1962,6 +1962,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="把本轮 token 用量和模型调用次数写入指定 JSON 文件（供基准测试读取）",
     )
     parser.add_argument(
+        "--trace-json",
+        default="",
+        help="把本轮每一步的工具调用与 Observation 写入指定 JSONL 文件（供自进化复盘）",
+    )
+    parser.add_argument(
         "--check-tools", action="store_true", help="只检查本地工具，不需要 API Key"
     )
     return parser
@@ -2118,6 +2123,24 @@ def _write_usage_json(path: str, agent: ReActAgent) -> None:
         print(_yellow(f"[用量写入失败] {exc}"))
 
 
+def _write_trace_json(path: str, agent: ReActAgent) -> None:
+    """把本轮轨迹写成 JSONL，供自进化/基准测试在子进程外复盘。"""
+    if not path:
+        return
+    try:
+        target = os.path.abspath(os.path.expanduser(path))
+        parent = os.path.dirname(target)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(target, "w", encoding="utf-8", newline="\n") as handle:
+            for item in agent.last_trace or []:
+                handle.write(
+                    json.dumps(item, ensure_ascii=False, default=str) + "\n"
+                )
+    except OSError as exc:
+        print(_yellow(f"[轨迹写入失败] {exc}"))
+
+
 def main(argv: list[str] | None = None) -> int:
     # 输出统一用 UTF-8，避免 Windows 下重定向/管道时中文乱码
     if hasattr(sys.stdout, "reconfigure"):
@@ -2160,6 +2183,7 @@ def main(argv: list[str] | None = None) -> int:
             return 130
         finally:
             _write_usage_json(args.usage_json, agent)
+            _write_trace_json(args.trace_json, agent)
         return 0
 
     return _repl(agent)

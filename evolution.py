@@ -60,6 +60,8 @@ TAG_PREFIX = "evo-gen-"
 PROTECTED_EXACT = {
     "evolution.py",
     "evolution_gate.py",
+    "meta_gate.py",
+    "meta_evolution.py",
     "evaluation.py",
     "config.py",
     "requirements.txt",
@@ -73,10 +75,11 @@ PROTECTED_PREFIXES = (
     "tests/",
     "data/",
     "benchmark/",
+    "meta/",
     ".git/",
     "__pycache__/",
 )
-PROTECTED_DIR_NAMES = {"tests", "data", "benchmark", ".git", "__pycache__"}
+PROTECTED_DIR_NAMES = {"tests", "data", "benchmark", "meta", ".git", "__pycache__"}
 
 _FORBIDDEN_GIT_OPS = {"commit", "tag", "checkout", "branch"}
 _DESTRUCTIVE_PATTERNS = (
