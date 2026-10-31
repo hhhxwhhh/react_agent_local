@@ -72,10 +72,11 @@ PROTECTED_EXACT = {
 PROTECTED_PREFIXES = (
     "tests/",
     "data/",
+    "benchmark/",
     ".git/",
     "__pycache__/",
 )
-PROTECTED_DIR_NAMES = {"tests", "data", ".git", "__pycache__"}
+PROTECTED_DIR_NAMES = {"tests", "data", "benchmark", ".git", "__pycache__"}
 
 _FORBIDDEN_GIT_OPS = {"commit", "tag", "checkout", "branch"}
 _DESTRUCTIVE_PATTERNS = (

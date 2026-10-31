@@ -237,6 +237,28 @@ class TestEvolutionHelpers(unittest.TestCase):
         # 没有基线时保持保守：tests/ 仍然整体冻结。
         self.assertTrue(evolution.find_path_violations(["tests/test_new_feature.py"]))
 
+    def test_benchmark_is_frozen(self):
+        # held-out 基准与裁判脚本属于冻结资源，Agent 不得改动。
+        with patch.object(
+            evolution,
+            "_path_in_commit",
+            side_effect=lambda commit, path: False,
+        ):
+            self.assertTrue(
+                evolution.find_path_violations(
+                    ["benchmark/runner.py"], baseline="abc1234"
+                )
+            )
+            self.assertTrue(
+                evolution.find_path_violations(
+                    ["benchmark/tasks/01-title/task.json"], baseline="abc1234"
+                )
+            )
+        self.assertTrue(evolution.find_path_violations(["benchmark"]))
+        self.assertTrue(
+            evolution.find_path_violations(["benchmark/direct.py"], baseline=None)
+        )
+
     def test_recent_trace_reads_last_generation(self):
         with tempfile.TemporaryDirectory() as tmp:
             folder = Path(tmp)
