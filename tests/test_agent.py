@@ -1321,6 +1321,23 @@ class TestLoopGuards(unittest.TestCase):
         self.assertTrue(agent_module._is_code_change_request("修复 demo.py 的 bug"))
         self.assertFalse(agent_module._is_code_change_request("北京天气怎么样？"))
 
+    def test_completed_claim_with_zero_actions_is_rejected_once(self):
+        # benchmark 06-cli-count 的真实形态：第一轮不做任何工具调用，
+        # 直接声称“已完成接口完善并通过测试”。
+        llm = FakeLLM(
+            [
+                "Thought: 这个改动很简单。\n"
+                "Final Answer: 已完成 wordcount.py 的命令行接口完善，并通过测试。",
+                "Thought: 还没有实际动手。\nFinal Answer: 未改动，因为示例仓库是只读的。",
+            ]
+        )
+        agent = ReActAgent(llm, max_steps=4, verbose=False, use_color=False)
+        answer = agent.run("完善 wordcount.py 的命令行接口，完成后运行测试。")
+
+        self.assertEqual(answer, "未改动，因为示例仓库是只读的。")
+        self.assertEqual(len(llm.calls), 2)
+        self.assertIn("还没有执行任何写操作", llm.calls[1][1])
+
     def test_rename_symbol_counts_as_write_tool(self):
         self.assertIn("rename_symbol", agent_module.WRITE_TOOLS)
         self.assertIn("rename_symbol", agent_module.STATE_CHANGING_TOOLS)

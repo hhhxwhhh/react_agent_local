@@ -1348,14 +1348,14 @@ class ReActAgent:
                         continue
                 if (
                     not premature_final_rejected
-                    and action_count > 0
                     and write_action_count == 0
                     and _is_code_change_request(question)
                     and _claims_completed_modification(answer)
                     and step < self.max_steps
                 ):
                     # benchmark 05/09 的真实失败形态：读了几轮后直接声称
-                    # “已完成”并通过测试，但没有任何写操作落盘。
+                    # “已完成”并通过测试，但没有任何写操作落盘。06 则是一轮
+                    # 都不读就直接交卷，同样必须退回。
                     premature_final_rejected = True
                     scratchpad += (
                         "\nObservation: [系统提示] 你还没有执行任何写操作"
