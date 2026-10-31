@@ -54,7 +54,7 @@ DEFAULT_MAX_STEPS = 40
 DEFAULT_TIMEOUT = 1800
 DEFAULT_OBJECTIVE = (
     "【自我托管 Harness】让 Harness 能解释自己，为后续自托管提供可观测性：\n"
-    "1. 新增 `python evolution.py --status --json`：输出最近 20 代的 JSON，"
+    "1. 新增 `python evolution.py --status --json`：输出最近 20 代的一行 JSON，"
     "结构必须包含 `generations`（总代数）、`decisions`（decision→数量）、"
     "`failure_modes`（失败模式→数量）、`entries`（每代 generation/decision/"
     "reason/component/failure_modes/tests/tokens/duration_seconds）。\n"

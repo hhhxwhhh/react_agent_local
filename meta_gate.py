@@ -342,6 +342,15 @@ def _check_cli(candidate: Path, checks: list[dict]) -> None:
                     break
                 except ValueError:
                     continue
+        if payload is None:
+            # 允许实现使用 indent 美化输出；截取第一个 { 到最后一个 }。
+            text = status_json.stdout
+            start, end = text.find("{"), text.rfind("}")
+            if start != -1 and end > start:
+                try:
+                    payload = json.loads(text[start : end + 1])
+                except ValueError:
+                    payload = None
         _check(isinstance(payload, dict), "--status --json 输出可解析的 JSON", checks)
         assert payload is not None
         _check(payload.get("generations") == 2, "JSON generations 为记录总数", checks)
