@@ -600,6 +600,25 @@ class TestFileTools(unittest.TestCase):
         self.assertIn("已写入", message)
         self.assertEqual(prompts, [])
 
+    def test_auto_permission_mode_approves_edit_lines_without_prompt(self):
+        # benchmark 12-flatten-recursive 的真实回归：edit_lines 不在
+        # FILE_WRITE_TOOLS 里，auto 模式仍弹授权，非交互评测里被拒绝。
+        prompts: list[dict] = []
+        context = ToolContext(
+            permission_mode="auto",
+            request_tool_permission=lambda payload: prompts.append(payload) or False,
+        )
+        message = edit_lines(
+            f"{self.folder}/auto_edit.py", ["x = 1", "y = 2"], start_line=0,
+            context=context,
+        )
+        self.assertIn("已按行覆盖", message)
+        self.assertEqual(prompts, [])
+        self.assertEqual(
+            Path(f"{self.folder}/auto_edit.py").read_text(encoding="utf-8"),
+            "x = 1\ny = 2\n",
+        )
+
     def test_edits_permission_mode_asks_for_unsafe_command(self):
         self.directory.mkdir(parents=True, exist_ok=True)
         prompts: list[dict] = []
@@ -1255,6 +1274,44 @@ class TestLoopGuards(unittest.TestCase):
         self.assertEqual(len(agent.last_trace), 1)
         self.assertTrue(agent_module._claims_empty_observations("我无法看到工具返回的结果"))
         self.assertFalse(agent_module._claims_empty_observations("结果是 4"))
+
+    def test_empty_observation_claim_with_reversed_word_order_is_detected(self):
+        # benchmark 12-flatten-recursive 的真实答案：语序是“没有返回 Observation”。
+        answer = (
+            "我按需求改写了 flatten.py，但本轮所有工具调用"
+            "（write_file、run_tests、run_command、read_file）都没有返回 Observation，"
+            "因此我无法确认改动是否已落盘。"
+        )
+        self.assertTrue(agent_module._claims_empty_observations(answer))
+        self.assertTrue(
+            agent_module._claims_empty_observations("run_tests 没有返回 Observation")
+        )
+        self.assertTrue(
+            agent_module._claims_empty_observations("本轮所有工具调用都没有返回任何观测")
+        )
+        self.assertFalse(
+            agent_module._claims_empty_observations(
+                "所有测试都没有通过，但已修改 flatten.py。"
+            )
+        )
+
+    def test_reversed_empty_observation_claim_is_rejected_once(self):
+        llm = FakeLLM(
+            [
+                'Thought: 先读文件。\nAction: read_file\n'
+                'Action Input: {"path": "README.md", "max_chars": 40}',
+                "Thought: 工具好像没返回。\nFinal Answer: 本轮所有工具调用"
+                "（read_file、write_file）都没有返回 Observation，无法确认改动。",
+                "Thought: 已看到真实结果。\nFinal Answer: 已读取 README。",
+            ]
+        )
+        agent = ReActAgent(llm, max_steps=5, verbose=False, use_color=False)
+        answer = agent.run("README 里写了什么？")
+
+        self.assertEqual(answer, "已读取 README。")
+        self.assertEqual(len(llm.calls), 3)
+        self.assertIn("Observation 为空/不可见", llm.calls[2][1])
+        self.assertIn("README.md", llm.calls[2][1])
 
 
 class TestMemory(unittest.TestCase):

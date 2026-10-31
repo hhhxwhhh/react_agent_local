@@ -6,11 +6,17 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import tools  # noqa: E402
-from tools import TOOL_FUNCS, TOOL_SPECS, rename_symbol  # noqa: E402
+from tools import (  # noqa: E402
+    TOOL_FUNCS,
+    TOOL_SPECS,
+    ToolContext,
+    rename_symbol,
+)
 
 
 SAMPLE = '''"""模块文档：foo 出现在字符串里不应被改。"""
@@ -86,6 +92,21 @@ class RenameSymbolTests(unittest.TestCase):
         text = (self.root / "imp.py").read_text(encoding="utf-8")
         self.assertIn("import numpy as numpy_alias", text)
         self.assertIn("numpy_alias.array", text)
+
+    def test_auto_mode_renames_without_prompting(self) -> None:
+        # rename_symbol 曾经不在 FILE_WRITE_TOOLS 里，auto 模式仍会弹授权，
+        # 非交互的基准评测里直接失败。
+        prompts: list[dict] = []
+        context = ToolContext(
+            permission_mode="auto",
+            request_tool_permission=lambda payload: prompts.append(payload) or False,
+        )
+        with patch.object(tools, "FILE_ROOT", self.root):
+            rename_symbol(
+                "foo", "bar", path=str(self.root), dry_run=False, context=context
+            )
+        self.assertEqual(prompts, [])
+        self.assertIn("def bar(x):", self.target.read_text(encoding="utf-8"))
 
     def test_invalid_identifier_raises(self) -> None:
         with self.assertRaises(ValueError):

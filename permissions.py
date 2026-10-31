@@ -23,7 +23,9 @@ MODES = ("ask", "edits", "auto", "readonly")
 FILE_WRITE_TOOLS = {
     "write_file",
     "edit_file",
+    "edit_lines",
     "apply_patch",
+    "rename_symbol",
     "move_file",
     "delete_file",
     "plan",
@@ -136,7 +138,7 @@ def _inside(path_value: Any, root: Path) -> bool:
 def _targets(payload: dict[str, Any]) -> list[Any]:
     """返回一次操作涉及的所有路径；空列表表示无法判断。"""
     tool = str(payload.get("tool") or "")
-    if tool == "apply_patch":
+    if tool in {"apply_patch", "rename_symbol"}:
         return list(payload.get("files") or [])
     if tool == "move_file":
         return [payload.get("source"), payload.get("destination")]
