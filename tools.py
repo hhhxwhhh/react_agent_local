@@ -2735,6 +2735,26 @@ def apply_patch(
     for path in changed:
         check_python_syntax(path, _restore_newlines(current[path], newlines[path]))
 
+    # 引用一致性预演（默认关闭）：写盘前用 AST 比较替换前后的悬空引用集合，
+    # 若新增悬空引用则整批不写，避免把定义改没了却留下调用点。
+    if _rename_preview_enabled():
+        preview_problems: list[str] = []
+        for path in changed:
+            if path.suffix != ".py":
+                continue
+            preview_problems.extend(
+                code_nav.preview_patch_consistency(
+                    _display_path(path),
+                    normalized_originals[path],
+                    _restore_newlines(current[path], newlines[path]),
+                )
+            )
+        if preview_problems:
+            raise ValueError(
+                "apply_patch 预演发现悬空引用，已阻止落盘：\n"
+                + "\n".join(preview_problems)
+            )
+
     written: list[Path] = []
     summaries: list[str] = []
     try:
@@ -3020,6 +3040,12 @@ def suggest_tests(
     return code_nav.suggest_tests(target, paths, max_results=max_results)
 
 
+def _rename_preview_enabled() -> bool:
+    """是否启用重命名前的 AST 引用一致性预演（默认关闭）。"""
+    value = os.environ.get("AGENT_RENAME_PREVIEW", "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
 def rename_symbol(
     old: str,
     new: str,
@@ -3039,6 +3065,12 @@ def rename_symbol(
         return code_nav.format_rename_plan(plan, dry_run)
     if dry_run:
         return code_nav.format_rename_plan(plan, True)
+    if _rename_preview_enabled():
+        problems = code_nav.preview_rename_consistency(plan)
+        if problems:
+            raise ValueError(
+                "重命名预演发现悬空引用，已阻止落盘：\n" + "\n".join(problems)
+            )
     for item in plan.files:
         _ensure_writable_target(item.path)
         if not _is_path_allowed(item.path):

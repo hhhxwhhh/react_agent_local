@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import ast
+import builtins
 import os
 import re
 from dataclasses import dataclass
@@ -30,6 +31,20 @@ SKIP_DIRS = {
 MAX_SCAN_FILES = 400
 MAX_FILE_BYTES = 1_000_000
 _SYMBOL_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+# 内置名与常见隐式绑定：预演悬空引用时不应把它们当成“未定义”。
+_BUILTIN_NAMES = set(dir(builtins)) | {
+    "self",
+    "cls",
+    "__name__",
+    "__file__",
+    "__doc__",
+    "__package__",
+    "__spec__",
+    "__loader__",
+    "__builtins__",
+    "__annotations__",
+}
 
 
 def _iter_python_files(root: Path) -> list[Path]:
@@ -368,6 +383,100 @@ def build_rename_plan(root: Path, old: str, new: str) -> RenamePlan:
             RenameFilePlan(path=path, label=label, lines=line_numbers, new_text=new_text)
         )
     return RenamePlan(old=old, new=new, files=plans)
+
+
+def _collect_defined_names(tree: ast.AST) -> set[str]:
+    """收集模块内所有 def/class/import 绑定的名字。"""
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                names.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                names.add(alias.asname or alias.name)
+    return names
+
+
+def _collect_referenced_names(tree: ast.AST) -> set[str]:
+    """收集模块内所有被引用的 Name/Attribute 根名字。"""
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            names.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            root = node
+            while isinstance(root, ast.Attribute):
+                root = root.value
+            if isinstance(root, ast.Name):
+                names.add(root.id)
+    return names
+
+
+def preview_rename_consistency(plan: RenamePlan) -> list[str]:
+    """AST 预演：把 plan 的 new_text 解析一遍，找出重命名后产生的悬空引用。
+
+    返回问题描述列表；空列表表示预演通过。只读、不写盘。
+    """
+    problems: list[str] = []
+    for item in plan.files:
+        try:
+            tree = ast.parse(item.new_text)
+        except SyntaxError as exc:
+            problems.append(
+                f"{item.label}: 重命名后语法错误（第 {exc.lineno} 行）：{exc.msg}"
+            )
+            continue
+        defined = _collect_defined_names(tree)
+        referenced = _collect_referenced_names(tree)
+        # 只关心“新名字被引用但未定义”的情况：说明重命名把定义改没了
+        if plan.new in referenced and plan.new not in defined:
+            problems.append(
+                f"{item.label}: 引用了 {plan.new} 但模块内没有定义，可能产生悬空引用"
+            )
+    return problems
+
+
+def preview_patch_consistency(
+    label: str, old_text: str, new_text: str
+) -> list[str]:
+    """AST 预演：比较替换前后模块的悬空引用集合，找出新增的悬空引用。
+
+    悬空引用 = 被引用但模块内既未定义、也不是内置名/导入名的名字。
+    返回问题描述列表；空列表表示预演通过。只读、不写盘。
+    """
+    try:
+        new_tree = ast.parse(new_text)
+    except SyntaxError as exc:
+        return [f"{label}: 替换后语法错误（第 {exc.lineno} 行）：{exc.msg}"]
+    try:
+        old_tree = ast.parse(old_text)
+    except SyntaxError:
+        # 原文本身不合法时无法比较，交给语法护栏处理
+        return []
+    new_dangling = _dangling_names(new_tree)
+    old_dangling = _dangling_names(old_tree)
+    introduced = sorted(new_dangling - old_dangling)
+    if not introduced:
+        return []
+    return [
+        f"{label}: 替换后新增悬空引用 {', '.join(introduced)}（模块内无定义，可能断引用）"
+    ]
+
+
+def _dangling_names(tree: ast.AST) -> set[str]:
+    """返回模块内被引用但未定义、且非内置/导入的名字集合。"""
+    defined = _collect_defined_names(tree)
+    referenced = _collect_referenced_names(tree)
+    return {
+        name
+        for name in referenced
+        if name not in defined
+        and name not in _BUILTIN_NAMES
+        and not name.startswith("__")
+    }
 
 
 def format_rename_plan(plan: RenamePlan, dry_run: bool) -> str:
