@@ -405,6 +405,59 @@ def classify_convergence_after_duplicate_block(trace: list[dict] | None) -> dict
     }
 
 
+# 拦截提醒中“下一步唯一合法动作”的内联标记（与 agent.py 的
+# _duplicate_next_action 保持同一口径）。本代在拦截提醒里直接内联该标记，
+# 让模型无需自行推断下一步，降低 duplicate_actions_after_diff 复发率。
+NEXT_LEGAL_ACTION_MARKER = "下一步唯一合法动作：run_tests"
+
+
+def measure_convergence_turn_rate(trace: list[dict] | None) -> dict:
+    """量化“拦截提醒内联唯一合法动作”后的转向率。
+
+    本代在 agent.py 的 _duplicate_next_action 中，对“已有非空改动但未验证”
+    场景直接内联 NEXT_LEGAL_ACTION_MARKER。本函数统计：被拦截（duplicate
+    标记且只读 git 命令）的 step 中，其 Observation 是否包含该内联标记，
+    以及下一步是否转向 run_tests / 落盘，从而量化“内联标记 → 转向”的
+    实际效果，供下一代判断是否继续强化措辞。
+
+    返回 dict：blocked 为被拦截次数，marked 为其中 Observation 含内联标记
+    的次数，converged 为下一步转向收敛的次数，turn_rate 为转向率
+    （converged / blocked，blocked 为 0 时为 0.0），marked_turn_rate 为
+    “含标记的拦截中转向的比例”（marked 为 0 时为 0.0）。
+    """
+    items = [item for item in trace_scan_window(trace) if isinstance(item, dict)]
+    blocked = 0
+    marked = 0
+    converged = 0
+    marked_converged = 0
+    for index, item in enumerate(items):
+        if not item.get("duplicate"):
+            continue
+        if not _is_git_readonly_step(item):
+            continue
+        blocked += 1
+        observation = str(item.get("observation") or "")
+        has_marker = NEXT_LEGAL_ACTION_MARKER in observation
+        if has_marker:
+            marked += 1
+        next_converged = (
+            index + 1 < len(items) and _is_convergence_step(items[index + 1])
+        )
+        if next_converged:
+            converged += 1
+            if has_marker:
+                marked_converged += 1
+    turn_rate = (converged / blocked) if blocked else 0.0
+    marked_turn_rate = (marked_converged / marked) if marked else 0.0
+    return {
+        "blocked": blocked,
+        "marked": marked,
+        "converged": converged,
+        "turn_rate": turn_rate,
+        "marked_turn_rate": marked_turn_rate,
+    }
+
+
 # “预检命中后是否转向 search_files / Final Answer”的独立诊断类别。
 # 第 40 代在 agent.py 的循环层加入 read_file 行号预检：首次越界即注入
 # [系统提醒] 并跳过工具执行，与 tools.py 的越界兜底形成双保险。本类别用于

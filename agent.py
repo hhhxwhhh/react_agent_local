@@ -864,7 +864,8 @@ class ReActAgent:
             base = (
                 "你已有非空改动（"
                 + "、".join(self.landed_files[:3])
-                + "），请立即用 run_tests 验证并收敛交卷。"
+                + "）。下一步唯一合法动作：run_tests。"
+                "请立即用 run_tests 验证并收敛交卷，不要再重复只读调用。"
             )
         elif self.landed_files and self.verification_status:
             base = (
