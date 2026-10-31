@@ -3068,9 +3068,11 @@ def rename_symbol(
     if _rename_preview_enabled():
         problems = code_nav.preview_rename_consistency(plan)
         if problems:
-            raise ValueError(
-                "重命名预演发现悬空引用，已阻止落盘：\n" + "\n".join(problems)
-            )
+            message = "重命名预演发现悬空引用，已阻止落盘：\n" + "\n".join(problems)
+            candidate = code_nav.format_rename_candidate_patch(plan)
+            if candidate:
+                message += "\n\n" + candidate
+            raise ValueError(message)
     for item in plan.files:
         _ensure_writable_target(item.path)
         if not _is_path_allowed(item.path):

@@ -479,6 +479,28 @@ def _dangling_names(tree: ast.AST) -> set[str]:
     }
 
 
+def format_rename_candidate_patch(plan: RenamePlan) -> str:
+    """把重命名计划渲染成 dry-run 候选补丁文本（不落盘）。
+
+    预演报错时用它把“被拦截”直接变成“可执行的修复建议”：
+    列出每个文件需要一并改名的所有引用点，并给出落盘指令。
+    返回空字符串表示没有可展示的改动。
+    """
+    if not plan.files:
+        return ""
+    lines: list[str] = [
+        f"候选补丁（dry-run，未落盘）：把 {plan.old} 的全部引用一并改名为 {plan.new}",
+        f"涉及 {len(plan.files)} 个文件、{plan.total_edits} 处引用点：",
+    ]
+    for item in plan.files:
+        nums = ", ".join(str(n) for n in item.lines)
+        lines.append(f"  {item.label}: 行 {nums}")
+    lines.append(
+        f"确认无误后执行：rename_symbol(old={plan.old!r}, new={plan.new!r}, dry_run=False)"
+    )
+    return "\n".join(lines)
+
+
 def format_rename_plan(plan: RenamePlan, dry_run: bool) -> str:
     """把重命名计划格式化为可读文本。"""
     if not plan.files:
