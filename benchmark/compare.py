@@ -4,6 +4,8 @@
 跑候选，分别写入两个结果目录，然后比较。
 
     python -X utf8 benchmark/compare.py baseline_results/ candidate_results/
+    python -X utf8 benchmark/compare.py direct/ react/ \
+        --baseline-mode direct --candidate-mode agent
     python -X utf8 benchmark/compare.py baseline/ candidate/ --json
 """
 
@@ -117,14 +119,28 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="比较两份 benchmark 结果目录")
     parser.add_argument("baseline", help="基线结果目录")
     parser.add_argument("candidate", help="候选结果目录")
-    parser.add_argument("--mode", default="agent", choices=("agent", "reference"))
+    parser.add_argument(
+        "--mode",
+        default="",
+        choices=("", "agent", "reference", "direct"),
+        help="同时设置两边的模式（兼容旧用法）",
+    )
+    parser.add_argument(
+        "--baseline-mode", default="agent", choices=("agent", "reference", "direct")
+    )
+    parser.add_argument(
+        "--candidate-mode", default="agent", choices=("agent", "reference", "direct")
+    )
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
-    baseline = load_latest_results(Path(args.baseline), mode=args.mode)
-    candidate = load_latest_results(Path(args.candidate), mode=args.mode)
+    baseline_mode = args.mode or args.baseline_mode
+    candidate_mode = args.mode or args.candidate_mode
+    baseline = load_latest_results(Path(args.baseline), mode=baseline_mode)
+    candidate = load_latest_results(Path(args.candidate), mode=candidate_mode)
     if not baseline or not candidate:
         missing = "baseline" if not baseline else "candidate"
-        raise SystemExit(f"{missing} 目录没有可用的 {args.mode} 结果")
+        mode = baseline_mode if not baseline else candidate_mode
+        raise SystemExit(f"{missing} 目录没有可用的 {mode} 结果")
     report = compare(baseline, candidate)
     text = (
         json.dumps(report, ensure_ascii=False, indent=2)

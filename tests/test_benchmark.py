@@ -186,6 +186,25 @@ class TestMetrics(unittest.TestCase):
         self.assertEqual(summary["tokens_per_solved"], 100.0)
         self.assertEqual(summary["failure_reasons"], {"hidden_tests_failed": 1})
 
+    def test_direct_mode_results_can_be_loaded_for_comparison(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "a.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "task": "a",
+                        "mode": "direct",
+                        "success": True,
+                        "timestamp": "20260101T000000Z",
+                        "agent": {"usage": {"total_tokens": 10}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            loaded = metrics.load_latest_results(Path(temp), mode="direct")
+            self.assertEqual(len(loaded), 1)
+            self.assertEqual(metrics.load_latest_results(Path(temp), mode="agent"), [])
+
     def test_compare_reports_fixed_and_regressed_tasks(self):
         def result(task, success, tokens):
             return {

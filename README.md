@@ -301,6 +301,9 @@ python -X utf8 benchmark/runner.py --all
 # 工具消融：同一批任务去掉 run_tests / apply_patch 再跑
 python -X utf8 benchmark/runner.py --all --disable-tools run_tests
 
+# 直接生成基线：不给工具，一次输出完整文件，用来衡量 ReAct 循环的增益
+python -X utf8 benchmark/direct.py --all
+
 # A/B：比较两个结果目录的解决率与 token 成本
 python -X utf8 benchmark/compare.py baseline_results/ candidate_results/
 
@@ -710,7 +713,7 @@ react_agent/
 
 ## 7. 测试
 
-离线测试（共 331 个用例，不需要 Key、不需要网络；符号链接用例在无权限的
+离线测试（共 341 个用例，不需要 Key、不需要网络；符号链接用例在无权限的
 Windows 环境会自动跳过）：
 
 ```bash
@@ -733,7 +736,7 @@ TTL 与过期清理、容量上限、上下文预算、单轮/跨轮上下文压
 非法坐标 422 校验、历史与记忆注入、SSE 流式接口、会话落盘、自进化裁判的
 冻结路径检查、diff 行数预算、测试/评分解析、临时沙箱安全探针、历史迭代摘要
 与建议闭环、root 文件访问模式、用量 JSON、工具消融、基准任务的参考解/篡改检测/
-指标聚合/A-B 对比/评分门禁、新增顶层符号的死代码检测，
+指标聚合/A-B 对比/评分门禁/单轮直接生成基线、新增顶层符号的死代码检测，
 以及 12 个离线行为评测场景（读取、行区间读取、错误恢复、会话记忆、批量补丁
 原子性、权限拒绝、受保护路径、重复调用、未知工具、强制收口、引用提取）。
 

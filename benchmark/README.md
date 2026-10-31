@@ -62,6 +62,24 @@ python -X utf8 benchmark/compare.py benchmark/results/baseline benchmark/results
 
 `compare.py` 只比较两边都出现过的任务；有回归时退出码为 1，适合放进发布检查。
 
+### 直接生成基线（Direct）
+
+`direct.py` 是 ReAct 的对照组：不给工具，把题面和仓库全文放进一次 prompt，
+让模型按 `### FILE: 相对路径.py` 输出完整文件，再跑同一套可见/隐藏测试。
+它回答的是“多轮循环相对单轮生成到底有没有增益”：
+
+```bash
+python -X utf8 benchmark/direct.py --all --results-dir benchmark/results/direct
+python -X utf8 benchmark/runner.py --all --results-dir benchmark/results/react
+python -X utf8 benchmark/compare.py benchmark/results/direct benchmark/results/react \
+  --baseline-mode direct --candidate-mode agent
+```
+
+默认 `--attempts 1` 是纯单轮；`--attempts 2` 会把失败测试发回模型修复一次，
+用来区分“一次生成不够”与“完全没有反馈”。结果 JSON 与运行器同构，所以
+`metrics.py` 和 `compare.py` 可以直接聚合。直接生成只测行为正确性，不评价
+代码风格，也不代表模型具备真实的多文件编辑能力。
+
 ### 接成自进化评分门禁（可选，成本高）
 
 `gate.py` 跑 3 个代表任务，输出 `score=<解决率>`，可临时替换

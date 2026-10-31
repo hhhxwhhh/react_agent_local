@@ -205,7 +205,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="汇总 benchmark 与 evolution 指标")
     parser.add_argument("--results-dir", default=str(DEFAULT_RESULTS))
     parser.add_argument("--ledger", default=str(DEFAULT_LEDGER))
-    parser.add_argument("--mode", default="agent", choices=("agent", "reference"))
+    parser.add_argument(
+        "--mode", default="agent", choices=("agent", "reference", "direct")
+    )
     parser.add_argument("--json", action="store_true", help="输出 JSON 而不是 Markdown")
     parser.add_argument("--output", default="", help="同时写入文件")
     return parser
