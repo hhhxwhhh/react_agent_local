@@ -1295,6 +1295,36 @@ class TestLoopGuards(unittest.TestCase):
             )
         )
 
+    def test_completed_claim_without_any_write_is_rejected_once(self):
+        # benchmark 09-memoize-fib 的真实形态：读了两轮后直接声称已完成。
+        llm = FakeLLM(
+            [
+                'Thought: 先读文件。\nAction: read_file\n'
+                'Action Input: {"path": "README.md", "max_chars": 40}',
+                "Thought: 我已经知道怎么改了。\nFinal Answer: 已完成 fib.py 的优化，"
+                "并通过测试。",
+                "Thought: 还没有真正落盘。\nFinal Answer: 未改动，因为示例仓库是只读的。",
+            ]
+        )
+        agent = ReActAgent(llm, max_steps=6, verbose=False, use_color=False)
+        answer = agent.run("优化 fib.py，完成后运行测试。")
+
+        self.assertEqual(answer, "未改动，因为示例仓库是只读的。")
+        self.assertEqual(len(llm.calls), 3)
+        self.assertIn("还没有执行任何写操作", llm.calls[2][1])
+        self.assertTrue(
+            agent_module._claims_completed_modification("已完成修复并通过测试")
+        )
+        self.assertFalse(
+            agent_module._claims_completed_modification("已读取 README，内容是示例。")
+        )
+        self.assertTrue(agent_module._is_code_change_request("修复 demo.py 的 bug"))
+        self.assertFalse(agent_module._is_code_change_request("北京天气怎么样？"))
+
+    def test_rename_symbol_counts_as_write_tool(self):
+        self.assertIn("rename_symbol", agent_module.WRITE_TOOLS)
+        self.assertIn("rename_symbol", agent_module.STATE_CHANGING_TOOLS)
+
     def test_reversed_empty_observation_claim_is_rejected_once(self):
         llm = FakeLLM(
             [

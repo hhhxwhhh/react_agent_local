@@ -57,6 +57,7 @@ STATE_CHANGING_TOOLS = {
     "write_file",
     "edit_lines",
     "apply_patch",
+    "rename_symbol",
     "run_command",
     "run_tests",
     "git",
@@ -68,6 +69,7 @@ WRITE_TOOLS = {
     "edit_lines",
     "apply_patch",
     "edit_file",
+    "rename_symbol",
     "move_file",
     "delete_file",
 }
@@ -129,6 +131,30 @@ def _is_evolution_task(question: str) -> bool:
     text = str(question or "")
     return "自进化 Harness" in text or "修改当前仓库中的自己" in text
 
+
+def _is_code_change_request(question: str) -> bool:
+    """粗判用户是否在要求改代码；避免对普通问答触发“声称完成”守卫。"""
+    text = str(question or "")
+    if not re.search(r"(修改|修复|实现|优化|重构|改写|新增|添加|删除|重命名|补全|完善|落盘|改代码)", text):
+        return False
+    return bool(
+        re.search(r"(\.py\b|代码|测试|文件|仓库|模块|函数|类)", text)
+        or re.search(r"tests?/", text)
+    )
+
+
+def _claims_completed_modification(answer: str) -> bool:
+    """检测答案是否声称已经完成修改/修复/实现。"""
+    text = str(answer or "")
+    if not text:
+        return False
+    patterns = (
+        r"(已|已经)(完成|修复|修改|实现|优化|更新|改写|重写|落盘|写入)",
+        r"(完成|修复|修改|实现|优化|更新|改写|重写)了",
+        r"(改动内容|修改内容|修复内容)[：:]",
+        r"测试(全部)?通过",
+    )
+    return any(re.search(pattern, text, re.I) for pattern in patterns)
 
 
 def _claims_empty_observations(answer: str) -> bool:
@@ -1245,6 +1271,7 @@ class ReActAgent:
         consecutive_duplicates = 0
         consecutive_invalid = 0
         action_count = 0
+        write_action_count = 0
         premature_final_rejected = False
         observation_claim_rejected = False
         read_only_streak = 0
@@ -1319,6 +1346,36 @@ class ReActAgent:
                             }
                         )
                         continue
+                if (
+                    not premature_final_rejected
+                    and action_count > 0
+                    and write_action_count == 0
+                    and _is_code_change_request(question)
+                    and _claims_completed_modification(answer)
+                    and step < self.max_steps
+                ):
+                    # benchmark 05/09 的真实失败形态：读了几轮后直接声称
+                    # “已完成”并通过测试，但没有任何写操作落盘。
+                    premature_final_rejected = True
+                    scratchpad += (
+                        "\nObservation: [系统提示] 你还没有执行任何写操作"
+                        "（write_file / edit_lines / apply_patch / rename_symbol "
+                        "或成功的写命令），但答案声称已经完成修改。该结论不成立，"
+                        "Final Answer 已被退回。如果任务确实不需要修改，请明确"
+                        "说明“未改动”及原因；否则现在用最小改动落盘，并运行测试"
+                        "验证后再作答。\n"
+                    )
+                    self._say(
+                        _yellow("(声称已完成修改但从未落盘，已退回 Final Answer)")
+                    )
+                    self._emit(
+                        {
+                            "type": "note",
+                            "step": step,
+                            "text": "声称已完成修改但从未落盘，Final Answer 已退回",
+                        }
+                    )
+                    continue
                 if (
                     _is_evolution_task(question)
                     and action_count == 0
@@ -1644,6 +1701,7 @@ class ReActAgent:
                             str(args.get("command", "")), observation
                         )
                     if landed:
+                        write_action_count += 1
                         read_only_streak = 0
                         # 一旦真正落盘，解除“落盘优先”提醒的触发条件。
                         self._persist_happened = True
