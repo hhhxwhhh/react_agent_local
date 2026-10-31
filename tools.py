@@ -38,6 +38,7 @@ import requests
 
 import code_nav
 import code_quality
+import impact_report as impact_report_mod
 from config import (
     BASE_DIR,
     COMMAND_MAX_OUTPUT_CHARS,
@@ -2968,6 +2969,29 @@ def find_references(
     )
 
 
+def impact_report(
+    symbol: str,
+    path: str = ".",
+    max_results: int = 50,
+) -> str:
+    """符号级改动影响面预检：一次输出定义/引用、涉及文件、受影响测试与最小验证命令。"""
+    target = _resolve_path(path)
+    if not target.exists():
+        raise ValueError(f"路径不存在：{_display_path(target)}")
+    if not _is_path_allowed(target):
+        raise ValueError("路径不在允许访问的范围内")
+    refs = code_nav.find_references(
+        target,
+        symbol,
+        max_results=max(1, min(int(max_results), 100)),
+    )
+    return impact_report_mod.impact_report(
+        symbol,
+        refs,
+        root=str(target),
+    )
+
+
 def find_importers(
     module: str,
     path: str = ".",
@@ -4452,6 +4476,27 @@ TOOL_SPECS: dict[str, dict] = {
             "required": ["symbol"],
         },
     },
+    "impact_report": {
+        "description": "符号级改动影响面预检：给定符号名，一次输出定义/引用位置、涉及文件、受影响测试模块与最小验证命令，把 find_references + suggest_tests 两步压缩成一次调用。只读。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "symbol": {
+                    "type": "string",
+                    "description": "要评估影响的 Python 标识符，例如 parse_output",
+                },
+                "path": {
+                    "type": "string",
+                    "description": "搜索起点，默认 .（项目根目录）",
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "最多分析多少处引用，1-100，默认 50",
+                },
+            },
+            "required": ["symbol"],
+        },
+    },
     "find_importers": {
         "description": "用 AST 找出所有导入了指定模块的 Python 文件，返回 文件:行号 与对应导入语句。支持 import m / import m as a / from m import n / from m import n as a，module 支持点号形式（如 pkg.mod），并支持 from . import name 这类相对导入。适合评估改动影响范围、确认模块被谁依赖。",
         "parameters": {
@@ -4911,6 +4956,7 @@ TOOL_FUNCS: dict[str, Callable[..., str]] = {
     "search_files": search_files,
     "repo_map": repo_map,
     "find_references": find_references,
+    "impact_report": impact_report,
     "find_importers": find_importers,
     "suggest_tests": suggest_tests,
     "rename_symbol": rename_symbol,
