@@ -287,7 +287,7 @@ python evolution.py --generations 3 --yes \
 ### 3.4 Held-out 编码基准
 
 自进化的日常验收只能证明“没退化”，不能证明“变强了”。`benchmark/` 提供一套
-Agent 进化时看不到的固定任务：15 个小型 Python 仓库，每个都有可见测试、隐藏
+Agent 进化时看不到的固定任务：17 个小型 Python 仓库，每个都有可见测试、隐藏
 测试和人工参考解。运行器在临时工作区里启动 Agent，隐藏测试只在 Agent 退出后
 才安装；改写已有可见测试会被判为篡改。
 

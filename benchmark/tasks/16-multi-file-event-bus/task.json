@@ -1,0 +1,12 @@
+{
+  "id": "16-multi-file-event-bus",
+  "title": "实现跨模块事件总线",
+  "category": "feature",
+  "difficulty": "hard",
+  "max_steps": 30,
+  "timeout_seconds": 300,
+  "test_timeout_seconds": 120,
+  "hidden": "hidden/test_16_event_bus_hidden.py",
+  "reference": "reference/",
+  "prompt": "实现 events.py 里的极简事件总线，并让 plugins.py 的默认订阅生效。\n要求：\n1. subscribe(event, handler, priority=0) 按事件保存处理函数；priority 越大越先执行，相同优先级保持订阅顺序。\n2. unsubscribe(event, handler) 取消订阅，成功返回 True，未找到返回 False。\n3. emit(event, payload=None) 依次调用处理函数，返回成功处理函数的返回值列表；某个处理函数抛异常时跳过它并继续执行其余处理函数。\n4. clear(event=None) 清空全部订阅，或只清空指定事件。\n5. 不同事件之间互不影响；payload 原样传给处理函数。\n6. plugins.register_defaults() 应把 audit 订阅到 order.created（priority=-10）。\n7. 不要修改 tests/ 下已有测试。完成后运行测试。"
+}

@@ -1,0 +1,12 @@
+{
+  "id": "17-failing-suite-triage",
+  "title": "定位并修复跨文件失败测试",
+  "category": "bugfix",
+  "difficulty": "hard",
+  "max_steps": 35,
+  "timeout_seconds": 360,
+  "test_timeout_seconds": 120,
+  "hidden": "hidden/test_17_cart_hidden.py",
+  "reference": "reference/",
+  "prompt": "仓库里的测试没有全部通过，问题分布在 cart.py 和 pricing.py 两个文件。\n要求：\n1. 先运行测试，根据失败输出定位根因，不要凭猜测改代码。\n2. 修复后 total(cart) 必须按 price * qty 计算总价。\n3. apply_discount(cart, percent) 必须按四舍五入处理分币，非法百分比抛出 ValueError 且不得改动购物车。\n4. format_price(cents) 必须始终保留两位小数。\n5. 不要修改 tests/ 下已有测试；隐藏测试会覆盖空购物车、默认数量、0%/100% 折扣和价格格式。\n6. 修复后运行全量测试确认没有回归。"
+}
